@@ -47,6 +47,21 @@ def call_lvlm_with_image(prompt: str, image_path: str, model: str = "gpt-4o-mini
     return resp.output_text.strip()
 
 
+def call_llm_text_only(prompt: str, model: str = "gpt-4o-mini") -> str:
+    """
+    Helper for prompts that are text-only (no image).
+    """
+    client = OpenAI()
+    resp = client.responses.create(
+        model=model,
+        input=[{
+            "role": "user",
+            "content": [{"type": "input_text", "text": prompt}],
+        }],
+    )
+    return resp.output_text.strip()
+
+
 def m3cot_stage1_scene_description(image_path: str, model: str = "gpt-4o-mini") -> str:
     """
     M3CoT Stage 1: Driving Scene Description
@@ -79,6 +94,58 @@ def m3cot_stage2_interactive_objects(image_path: str, model: str = "gpt-4o-mini"
     return call_lvlm_with_image(prompt, image_path, model=model)
 
 
+def m3cot_stage3_navigation_goal(target_left_m: float, target_front_m: float) -> str:
+    """
+    M3CoT Stage 3: Navigation Goal Prompting
+
+    In the paper, this is expressed as a relative target position in meters:
+      "The target is X meters to your left/right and Y meters to your front."
+
+    Convention we’ll use:
+    - target_left_m > 0  => left
+    - target_left_m < 0  => right
+    - target_front_m > 0 => in front
+    """
+    lr = "left" if target_left_m >= 0 else "right"
+    return f"The target is {abs(target_left_m):.3f} meters to your {lr} and {target_front_m:.1f} meters to your front."
+
+
+def m3cot_stage4_future_intent(
+    scene_description: str,
+    objects_description: str,
+    navigation_goal: str,
+    image_path: str | None = None,
+    model: str = "gpt-4o-mini",
+) -> str:
+    """
+    M3CoT Stage 4: Future Intent Description
+
+    Input: Stage 1 + Stage 2 + Stage 3 (optionally image again)
+    Output: concise plan + rationale (safe, goal-oriented)
+    """
+    prompt = (
+        "Future Intent Description:\n"
+        "You are controlling the ego vehicle. Based on the context below, describe how you would "
+        "navigate to reach the target safely.\n\n"
+        f"Scene description:\n{scene_description}\n\n"
+        f"Objects description:\n{objects_description}\n\n"
+        f"Navigation goal:\n{navigation_goal}\n\n"
+        "Write a concise intent as a numbered list (3-6 items). Include:\n"
+        "1) speed control (maintain/slow/stop if needed),\n"
+        "2) direction control (keep lane / slight left/right),\n"
+        "3) safety (avoid collisions, keep safe distance),\n"
+        "4) goal alignment (move toward target).\n"
+        "Do not invent objects that are not mentioned. If something is uncertain, say 'unclear'."
+    )
+
+    # Including the image is optional. For now, keep it consistent with vision-based grounding.
+    if image_path is not None:
+        return call_lvlm_with_image(prompt, image_path, model=model)
+    else:
+        return call_llm_text_only(prompt, model=model)
+
+
+
 if __name__ == "__main__":
     MODEL = "gpt-4o-mini"
 
@@ -92,6 +159,8 @@ if __name__ == "__main__":
 
     # stage1 = m3cot_stage1_scene_description(IMAGE_PATH, model=MODEL)
     # stage2 = m3cot_stage2_interactive_objects(IMAGE_PATH, model=MODEL)
+    # stage3 = m3cot_stage3_navigation_goal(10, 20)
+    # stage4 = m3cot_stage4_future_intent(stage1, stage2, stage3, IMAGE_PATH, model=MODEL)
 
     # print("\n=== M3CoT Stage 1: Scene Description ===")
     # print(stage1)
@@ -102,3 +171,18 @@ if __name__ == "__main__":
     # # Optional: bundle for later LangPack / Stage 4
     # m3cot_outputs = {"scene_description": stage1, "objects_description": stage2}
     # print("\nBundle:", m3cot_outputs)
+
+
+    # print("\n=== M3CoT Stage 3: Navigation Goal ===")
+    # print(stage3)
+
+    # print("\n=== M3CoT Stage 4: Future Intent ===")
+    # print(m3cot_stage4_future_intent(stage1, stage2, stage3, IMAGE_PATH, model=MODEL))
+
+    # m3cot_outputs = {
+    #     "scene_description": stage1,
+    #     "objects_description": stage2,
+    #     "navigation_goal": stage3,
+    # }
+
+
