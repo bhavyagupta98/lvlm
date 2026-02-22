@@ -1,0 +1,34 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: carla-client-dev
+  namespace: seelab
+  labels:
+    app: carla-client-dev
+spec:
+  restartPolicy: Never
+  containers:
+  - name: client
+    image: python:3.10-slim
+    command: ["/bin/bash", "-lc"]
+    args:
+      - |
+        set -e
+        echo "carla-client-dev is ready."
+        echo "PVC mounted at /workspace"
+        echo "Sleeping forever..."
+        sleep infinity
+    resources:
+      requests:
+        cpu: "2"
+        memory: "4Gi"
+      limits:
+        cpu: "4"
+        memory: "8Gi"
+    volumeMounts:
+    - name: storage
+      mountPath: /workspace
+  volumes:
+  - name: storage
+    persistentVolumeClaim:
+      claimName: bgupta-pvc
