@@ -49,8 +49,12 @@ class LangCoopAgent:
         self.current_speed = 0.0
         self.current_yaw = 0.0
         self.waypoints_queue = []
-        self.target_speed = 8.0  # LangCoop default
+        self.target_speed = float(self.config.get('control', {}).get('target_speed', 12.0))
         self.target_yaw = 0.0
+        self.last_planned_route = None
+        self.waypoint_reach_threshold = float(
+            self.config.get('planning', {}).get('waypoint_reach_threshold', 4.0)
+        )
         
         # Perception memory bank (LangCoop architecture)
         self.perception_memory_bank = []
@@ -83,7 +87,7 @@ class LangCoopAgent:
                 return
             
             self.vlm_planner = VLMPlannerSpeedCurvature(
-                api_model_name=vlm_config.get('api_model_name', 'Qwen/Qwen2.5-VL-3B-Instruct-AWQ'),
+                api_model_name=vlm_config.get('api_model_name', 'Qwen/Qwen2.5-VL-7B-Instruct-AWQ'),
                 api_base_url=vlm_config.get('api_base_url', 'http://localhost:8000/v1'),
                 api_key=vlm_config.get('api_key', 'EMPTY')
             )
@@ -104,7 +108,19 @@ class LangCoopAgent:
             speed_kp=control_config.get('speed_kp', 0.8),
             speed_ki=control_config.get('speed_ki', 0.1),
             speed_kd=control_config.get('speed_kd', 0.2),
-            steer_kp=control_config.get('steer_kp', 1.0)
+            steer_kp=control_config.get('steer_kp', 1.0),
+            turn_kp=control_config.get('turn_kp', control_config.get('steer_kp', 1.0)),
+            turn_ki=control_config.get('turn_ki', 0.2),
+            turn_kd=control_config.get('turn_kd', 0.1),
+            turn_n=control_config.get('turn_n', 30),
+            speed_n=control_config.get('speed_n', 5),
+            clip_delta=control_config.get('clip_delta', 0.35),
+            brake_ratio=control_config.get('brake_ratio', 1.1),
+            brake_speed=control_config.get('brake_speed', 0.1),
+            max_throttle=control_config.get('max_throttle', 0.75),
+            max_brake=control_config.get('max_brake', 1.0),
+            max_steer=control_config.get('max_steer', 1.0),
+            curvature_scale=control_config.get('curvature_scale', 3.0)
         )
         logger.info("LangCoop Controller initialized")
     
@@ -208,14 +224,42 @@ class LangCoopAgent:
     def _get_target_waypoint(self) -> List[float]:
         """Get target waypoint relative to current position."""
         if self.waypoints_queue:
-            target_wp = self.waypoints_queue[0]
-            target_loc = target_wp.transform.location
-            current_loc = self.vehicle.get_transform().location
-            
-            return [
-                target_loc.x - current_loc.x,
-                target_loc.y - current_loc.y
-            ]
+            current_transform = self.vehicle.get_transform()
+            current_loc = current_transform.location
+
+            # Drop waypoints that are already reached or are clearly behind ego.
+            # This prevents stale behind-target prompts that can deadlock planning.
+            while self.waypoints_queue:
+                first_wp_loc = self.waypoints_queue[0].transform.location
+                dx0 = first_wp_loc.x - current_loc.x
+                dy0 = first_wp_loc.y - current_loc.y
+
+                cos_yaw0 = np.cos(-self.current_yaw)
+                sin_yaw0 = np.sin(-self.current_yaw)
+                local_y0 = -cos_yaw0 * dx0 + sin_yaw0 * dy0
+
+                reached = current_loc.distance(first_wp_loc) <= self.waypoint_reach_threshold
+                behind_ego = local_y0 > 2.0
+                if reached or behind_ego:
+                    self.waypoints_queue.pop(0)
+                    continue
+                break
+
+            if self.waypoints_queue:
+                target_wp = self.waypoints_queue[0]
+                target_loc = target_wp.transform.location
+
+                dx = target_loc.x - current_loc.x
+                dy = target_loc.y - current_loc.y
+
+                cos_yaw = np.cos(-self.current_yaw)
+                sin_yaw = np.sin(-self.current_yaw)
+
+                local_x = sin_yaw * dx + cos_yaw * dy
+                local_y = -cos_yaw * dx + sin_yaw * dy
+
+                return [local_x, local_y]
+
         return [10.0, 0.0]  # Default: 10m forward
     
     def step(self) -> carla.VehicleControl:
@@ -243,6 +287,7 @@ class LangCoopAgent:
             }
         
         # Control
+        self.last_planned_route = planned_route
         control = self._compute_control(planned_route)
         
         return control

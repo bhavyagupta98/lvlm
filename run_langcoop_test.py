@@ -12,8 +12,10 @@ Features:
 """
 
 import argparse
+import json
 import logging
 import sys
+import textwrap
 from pathlib import Path
 import carla
 import time
@@ -25,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from test_runner.agents import LangCoopAgent
 from test_runner.evaluator.metrics import MetricsCalculator
 from test_runner.evaluator.scenario_manager import ScenarioManager, Scenario, Route
-from test_runner.visualization import MetricsVisualizer
+from test_runner.visualization import MetricsVisualizer, LiveMetricsTracer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -218,6 +220,10 @@ class LangCoopTestRunner:
         route_distance = route.compute_distance()
         route_metric_id = f"{scenario.scenario_id}_agent_0"
         logger.info(f"Route: {len(route.waypoints)} waypoints, {route_distance:.1f}m")
+
+        # Reset this route's metrics explicitly so live traces start from 0.
+        self.metrics_calculator.set_route_completion(route_metric_id, 0.0, route_distance, 0.0)
+        self.metrics_calculator.set_speed_metrics(route_metric_id, 0.0, 0.0)
         
         # Setup environment
         self.setup_environment(scenario)
@@ -248,17 +254,72 @@ class LangCoopTestRunner:
         completed_distance = 0.0
         prev_location = self.vehicle.get_location()
         speed_samples = []
+        last_control = carla.VehicleControl()
+        last_target_speed = 0.0
+        last_planner_debug = {}
+        hazard_debug_stats = {
+            'sampled_frames': 0,
+            'sampled_static_hazard_frames': 0,
+            'sampled_proximity_frames': 0,
+            'sampled_guard_applied_frames': 0,
+            'sampled_wall_barrier_mentions': 0,
+            'saved_debug_frames': 0,
+        }
+        first_distance_sample = True
+        live_trace_interval = 10
+        live_tracer = LiveMetricsTracer(
+            output_dir=str(self.results_dir),
+            scenario_id=scenario.scenario_id,
+            route_id=route_metric_id
+        )
         
         collision_sensor = self._setup_collision_sensor(route_metric_id)
+        last_live_snapshot = None
         
+        aborted_reason = None
         for step in range(max_steps):
-            self.world.tick()
+            try:
+                self.world.tick()
+            except RuntimeError as e:
+                aborted_reason = str(e)
+                logger.error(f"Simulator tick failed at step {step}: {aborted_reason}")
+                self.metrics_calculator.record_event(
+                    route_metric_id,
+                    step,
+                    'timeout',
+                    description=aborted_reason
+                )
+                break
             
             # Agent step (follows LangCoop skip_frames=4 pattern)
             if step % skip_frames == 0:
                 try:
                     control = self.agent.step()
                     self.vehicle.apply_control(control)
+                    last_control = control
+
+                    if hasattr(self.agent, 'last_planned_route') and isinstance(self.agent.last_planned_route, dict):
+                        target_speed_arr = self.agent.last_planned_route.get('target_speed', [0.0])
+                        if isinstance(target_speed_arr, list) and target_speed_arr:
+                            last_target_speed = float(target_speed_arr[0])
+                        else:
+                            last_target_speed = float(target_speed_arr)
+                        last_planner_debug = self._extract_planner_debug(self.agent.last_planned_route)
+
+                    velocity_after_control = self.vehicle.get_velocity()
+                    speed_after_control = np.linalg.norm([
+                        velocity_after_control.x,
+                        velocity_after_control.y,
+                        velocity_after_control.z
+                    ])
+                    logger.debug(
+                        "Applied control | step=%d throttle=%.3f brake=%.3f steer=%.3f speed=%.3f",
+                        step,
+                        float(control.throttle),
+                        float(control.brake),
+                        float(control.steer),
+                        float(speed_after_control)
+                    )
                 except Exception as e:
                     logger.error(f"Agent step failed at step {step}: {e}")
                     self.metrics_calculator.record_event(
@@ -271,18 +332,15 @@ class LangCoopTestRunner:
             
             # Update metrics
             current_location = self.vehicle.get_location()
-            distance_delta = current_location.distance(prev_location)
+            if first_distance_sample:
+                # Ignore the first sample to avoid spawn/tick jitter inflating RC at t=0.
+                distance_delta = 0.0
+                first_distance_sample = False
+            else:
+                distance_delta = current_location.distance(prev_location)
             completed_distance += distance_delta
             prev_location = current_location
-            
-            # Save camera image every 10 steps (every ~0.5s at 20 Hz)
-            if step % 10 == 0 and 'camera' in self.agent.sensor_data:
-                self._save_camera_image(
-                    self.agent.sensor_data['camera'],
-                    scenario.scenario_id,
-                    step
-                )
-            
+
             # Check infractions
             velocity = self.vehicle.get_velocity()
             speed = np.linalg.norm([velocity.x, velocity.y, velocity.z])
@@ -295,6 +353,56 @@ class LangCoopTestRunner:
                     'speed_violation',
                     description=f"speed={speed:.2f}"
                 )
+
+            if step % live_trace_interval == 0:
+                last_live_snapshot = self._build_live_metrics_snapshot(
+                    route_metric_id=route_metric_id,
+                    step=step,
+                    max_steps=max_steps,
+                    completed_distance=completed_distance,
+                    route_distance=route_distance,
+                    start_time=start_time,
+                    speed_samples=speed_samples,
+                    current_speed=speed,
+                    current_steer=float(last_control.steer),
+                    target_speed=last_target_speed,
+                    planner_debug=last_planner_debug,
+                    hazard_debug_stats=hazard_debug_stats
+                )
+
+                hazard_debug_stats['sampled_frames'] += 1
+                if last_live_snapshot.get('static_hazard_detected', False):
+                    hazard_debug_stats['sampled_static_hazard_frames'] += 1
+                if last_live_snapshot.get('hazard_proximity_detected', False):
+                    hazard_debug_stats['sampled_proximity_frames'] += 1
+                if last_live_snapshot.get('static_guard_applied', False):
+                    hazard_debug_stats['sampled_guard_applied_frames'] += 1
+                if last_live_snapshot.get('wall_barrier_mentioned', False):
+                    hazard_debug_stats['sampled_wall_barrier_mentions'] += 1
+
+                live_tracer.update(last_live_snapshot)
+
+                logger.info(
+                    "Live Trace | step=%d/%d sim=%.1f%% route=%.1f%% DS=%.1f speed=%.1f m/s collisions=%d violations=%d",
+                    step,
+                    max_steps,
+                    last_live_snapshot['simulation_progress_pct'],
+                    last_live_snapshot['rs'],
+                    last_live_snapshot['ds'],
+                    last_live_snapshot['speed_mps'],
+                    last_live_snapshot['collisions'],
+                    last_live_snapshot['violations']
+                )
+
+            # Save camera image every 10 steps (every ~0.5s at 20 Hz)
+            if step % 10 == 0 and 'camera' in self.agent.sensor_data:
+                self._save_camera_image(
+                    self.agent.sensor_data['camera'],
+                    scenario.scenario_id,
+                    step,
+                    metrics_snapshot=last_live_snapshot
+                )
+                hazard_debug_stats['saved_debug_frames'] += 1
             
             # Progress logging
             if step % 100 == 0:
@@ -303,7 +411,14 @@ class LangCoopTestRunner:
         
         # Cleanup
         if collision_sensor:
-            collision_sensor.destroy()
+            try:
+                collision_sensor.stop()
+            except Exception:
+                pass
+            try:
+                collision_sensor.destroy()
+            except Exception:
+                pass
         if self.agent:
             self.agent.destroy()
         if self.vehicle and self.vehicle.is_alive:
@@ -323,7 +438,44 @@ class LangCoopTestRunner:
                 float(np.mean(speed_samples)),
                 float(np.max(speed_samples))
             )
-        self.metrics_calculator.calculate_driving_score(route_metric_id)
+        final_ds = self.metrics_calculator.calculate_driving_score(route_metric_id)
+        final_route_metrics = self.metrics_calculator.get_route_metrics(route_metric_id)
+        final_violations = final_route_metrics.lane_departures + final_route_metrics.speed_violations
+        final_speed = speed_samples[-1] if speed_samples else 0.0
+
+        final_snapshot = {
+            'step': int(max_steps),
+            'simulation_progress_pct': 100.0,
+            'elapsed_wall_time_sec': float(elapsed_time),
+            'distance_m': float(completed_distance),
+            'route_distance_m': float(route_distance),
+            'rs': float(final_route_metrics.completion_percentage),
+            'rc': float(final_route_metrics.completion_percentage),
+            'ds': float(final_ds),
+            'speed_mps': float(final_speed),
+            'target_speed_mps': float(last_target_speed),
+            'steer': float(last_control.steer),
+            'steer_deg': float(last_control.steer * 70.0),
+            'collisions': int(final_route_metrics.collisions),
+            'violations': int(final_violations),
+            'route_id': route_metric_id,
+            'static_hazard_detected': bool(last_planner_debug.get('hazard_signals', {}).get('has_static_hazard', False)),
+            'hazard_proximity_detected': bool(last_planner_debug.get('hazard_signals', {}).get('has_proximity_cue', False)),
+            'static_guard_applied': bool(last_planner_debug.get('static_guard_applied', False)),
+            'wall_barrier_mentioned': bool(last_planner_debug.get('wall_barrier_mentioned', False)),
+            'hazard_side': str(last_planner_debug.get('hazard_signals', {}).get('hazard_side', 'none')),
+            'static_guard_reason': str(last_planner_debug.get('static_guard_reason', '')),
+            'planner_scene_excerpt': str(last_planner_debug.get('scene_excerpt', '')),
+            'planner_objects_excerpt': str(last_planner_debug.get('objects_excerpt', '')),
+            'planner_intent_excerpt': str(last_planner_debug.get('intent_excerpt', '')),
+            'hazard_debug_stats': dict(hazard_debug_stats),
+        }
+        live_tracer.update(final_snapshot)
+        self._write_scenario_debug_summary(
+            scenario_id=scenario.scenario_id,
+            final_snapshot=final_snapshot,
+            hazard_debug_stats=hazard_debug_stats
+        )
 
         metrics = self.metrics_calculator.get_summary()
         route_metrics = metrics.get('routes', {}).get(route_metric_id, {})
@@ -333,8 +485,94 @@ class LangCoopTestRunner:
         logger.info(f"  Driving Score: {route_metrics.get('ds', 0.0):.1f}/100")
         logger.info(f"  Collisions: {metrics['total_collisions']}")
         logger.info(f"  Total Violations: {metrics['total_violations']}")
+        if aborted_reason:
+            logger.warning(f"  Scenario aborted early due to simulator timeout: {aborted_reason}")
         
         return metrics
+
+    def _build_live_metrics_snapshot(
+        self,
+        route_metric_id: str,
+        step: int,
+        max_steps: int,
+        completed_distance: float,
+        route_distance: float,
+        start_time: float,
+        speed_samples: list,
+        current_speed: float,
+        current_steer: float,
+        target_speed: float,
+        planner_debug: dict,
+        hazard_debug_stats: dict
+    ) -> dict:
+        """Compute a consistent live metrics snapshot for logging, tracing, and frame overlays."""
+        elapsed_time = time.time() - start_time
+        self.metrics_calculator.set_route_completion(
+            route_metric_id,
+            completed_distance,
+            route_distance,
+            elapsed_time
+        )
+        if speed_samples:
+            self.metrics_calculator.set_speed_metrics(
+                route_metric_id,
+                float(np.mean(speed_samples)),
+                float(np.max(speed_samples))
+            )
+
+        live_ds = self.metrics_calculator.calculate_driving_score(route_metric_id)
+        live_route_metrics = self.metrics_calculator.get_route_metrics(route_metric_id)
+        live_violations = live_route_metrics.lane_departures + live_route_metrics.speed_violations
+        progress_pct = ((step + 1) / max_steps) * 100 if max_steps > 0 else 0.0
+
+        return {
+            'step': int(step),
+            'simulation_progress_pct': float(progress_pct),
+            'elapsed_wall_time_sec': float(elapsed_time),
+            'distance_m': float(completed_distance),
+            'route_distance_m': float(route_distance),
+            'rs': float(live_route_metrics.completion_percentage),
+            'rc': float(live_route_metrics.completion_percentage),
+            'ds': float(live_ds),
+            'speed_mps': float(current_speed),
+            'target_speed_mps': float(target_speed),
+            'steer': float(current_steer),
+            'steer_deg': float(current_steer * 70.0),
+            'collisions': int(live_route_metrics.collisions),
+            'violations': int(live_violations),
+            'route_id': route_metric_id,
+            'static_hazard_detected': bool(planner_debug.get('hazard_signals', {}).get('has_static_hazard', False)),
+            'hazard_proximity_detected': bool(planner_debug.get('hazard_signals', {}).get('has_proximity_cue', False)),
+            'static_guard_applied': bool(planner_debug.get('static_guard_applied', False)),
+            'wall_barrier_mentioned': bool(planner_debug.get('wall_barrier_mentioned', False)),
+            'hazard_side': str(planner_debug.get('hazard_signals', {}).get('hazard_side', 'none')),
+            'static_guard_reason': str(planner_debug.get('static_guard_reason', '')),
+            'planner_scene_excerpt': str(planner_debug.get('scene_excerpt', '')),
+            'planner_objects_excerpt': str(planner_debug.get('objects_excerpt', '')),
+            'planner_intent_excerpt': str(planner_debug.get('intent_excerpt', '')),
+            'hazard_debug_stats': dict(hazard_debug_stats),
+        }
+
+    def _extract_planner_debug(self, planned_route: dict) -> dict:
+        """Extract compact planner diagnostics for logging overlays and sidecar files."""
+        debug = planned_route.get('_debug', {}) if isinstance(planned_route, dict) else {}
+
+        scene = str(debug.get('scene_description', '') or '')
+        objects = str(debug.get('object_description', '') or '')
+        intent = str(debug.get('intent_description', '') or '')
+        merged = f"{scene} {objects}".lower()
+
+        return {
+            'zero_deadlock_streak': int(debug.get('zero_deadlock_streak', 0) or 0),
+            'zero_override_candidate': bool(debug.get('zero_override_candidate', False)),
+            'static_guard_applied': bool(debug.get('static_guard_applied', False)),
+            'static_guard_reason': str(debug.get('static_guard_reason', '')),
+            'hazard_signals': debug.get('hazard_signals', {}),
+            'scene_excerpt': scene[:260],
+            'objects_excerpt': objects[:260],
+            'intent_excerpt': intent[:260],
+            'wall_barrier_mentioned': any(tok in merged for tok in ('wall', 'barrier', 'guardrail', 'curb', 'fence')),
+        }
     
     def _setup_collision_sensor(self, route_metric_id: str):
         """Setup collision detection sensor."""
@@ -345,12 +583,17 @@ class LangCoopTestRunner:
             carla.Transform(),
             attach_to=self.vehicle
         )
+        last_collision_frame = {'value': -999999}
         
         def on_collision(event):
+            frame = int(event.frame)
+            if frame - last_collision_frame['value'] < 15:
+                return
+            last_collision_frame['value'] = frame
             logger.warning(f"Collision detected with {event.other_actor.type_id}")
             self.metrics_calculator.record_event(
                 route_metric_id,
-                int(event.frame),
+                frame,
                 'collision',
                 description=event.other_actor.type_id
             )
@@ -358,23 +601,108 @@ class LangCoopTestRunner:
         collision_sensor.listen(on_collision)
         return collision_sensor
     
-    def _save_camera_image(self, image: np.ndarray, scenario_id: str, step: int):
+    def _save_camera_image(self, image: np.ndarray, scenario_id: str, step: int, metrics_snapshot: dict | None = None):
         """Save camera image to disk for visualization."""
         try:
-            from PIL import Image
+            from PIL import Image, ImageDraw, ImageFont
             scenario_img_dir = self.images_dir / scenario_id
             scenario_img_dir.mkdir(parents=True, exist_ok=True)
             
             img_path = scenario_img_dir / f"frame_{step:06d}.jpg"
             pil_image = Image.fromarray(image.astype(np.uint8))
+            if metrics_snapshot:
+                draw = ImageDraw.Draw(pil_image, 'RGBA')
+                font = ImageFont.load_default()
+
+                header_lines = [
+                    f"Step {metrics_snapshot['step']}  |  Sim {metrics_snapshot['simulation_progress_pct']:.1f}%  |  Route {metrics_snapshot['rs']:.1f}%  |  DS {metrics_snapshot['ds']:.1f}",
+                    f"Speed {metrics_snapshot['speed_mps']:.1f} m/s  |  Target {metrics_snapshot.get('target_speed_mps', 0.0):.1f} m/s  |  Steer {metrics_snapshot.get('steer', 0.0):+.3f} ({metrics_snapshot.get('steer_deg', 0.0):+.1f} deg)",
+                    f"Dist {metrics_snapshot['distance_m']:.1f}/{metrics_snapshot['route_distance_m']:.1f} m  |  Collisions {metrics_snapshot['collisions']}  |  Violations {metrics_snapshot['violations']}",
+                    f"Hazard static={metrics_snapshot.get('static_hazard_detected', False)} proximity={metrics_snapshot.get('hazard_proximity_detected', False)} guard={metrics_snapshot.get('static_guard_applied', False)} side={metrics_snapshot.get('hazard_side', 'none')}",
+                    f"Route ID: {metrics_snapshot['route_id']}"
+                ]
+
+                wrapped_lines = []
+                for line in header_lines:
+                    wrapped_lines.extend(textwrap.wrap(line, width=70) or [line])
+
+                line_height = 16
+                padding = 10
+                box_height = padding * 2 + line_height * len(wrapped_lines)
+                box_width = min(pil_image.width - 20, 760)
+
+                draw.rounded_rectangle(
+                    [(10, 10), (10 + box_width, 10 + box_height)],
+                    radius=12,
+                    fill=(0, 0, 0, 170)
+                )
+
+                text_y = 10 + padding
+                for line in wrapped_lines:
+                    draw.text((20, text_y), line, fill=(255, 255, 255, 255), font=font)
+                    text_y += line_height
+
             pil_image.save(img_path, quality=85)
+            if metrics_snapshot:
+                self._write_frame_debug_log(
+                    scenario_id=scenario_id,
+                    step=step,
+                    image_path=img_path,
+                    metrics_snapshot=metrics_snapshot
+                )
         except Exception as e:
             logger.debug(f"Failed to save image at step {step}: {e}")
+
+    def _write_frame_debug_log(self, scenario_id: str, step: int, image_path: Path, metrics_snapshot: dict):
+        """Write sidecar JSON and append JSONL trace next to saved images for easy copying."""
+        scenario_img_dir = self.images_dir / scenario_id
+        scenario_img_dir.mkdir(parents=True, exist_ok=True)
+
+        frame_payload = dict(metrics_snapshot)
+        frame_payload['scenario_id'] = scenario_id
+        frame_payload['frame_step'] = int(step)
+        frame_payload['image_file'] = image_path.name
+
+        sidecar_path = scenario_img_dir / f"frame_{step:06d}.debug.json"
+        with sidecar_path.open('w', encoding='utf-8') as f:
+            json.dump(frame_payload, f, indent=2)
+
+        trace_path = scenario_img_dir / 'debug_trace.jsonl'
+        with trace_path.open('a', encoding='utf-8') as f:
+            f.write(json.dumps(frame_payload, ensure_ascii=True) + "\n")
+
+    def _write_scenario_debug_summary(self, scenario_id: str, final_snapshot: dict, hazard_debug_stats: dict):
+        """Write compact scenario-level hazard/perception summary into image folder."""
+        scenario_img_dir = self.images_dir / scenario_id
+        scenario_img_dir.mkdir(parents=True, exist_ok=True)
+
+        sampled = max(int(hazard_debug_stats.get('sampled_frames', 0)), 1)
+        summary_payload = {
+            'scenario_id': scenario_id,
+            'route_id': final_snapshot.get('route_id', ''),
+            'final_route_completion_pct': float(final_snapshot.get('rc', 0.0)),
+            'final_driving_score': float(final_snapshot.get('ds', 0.0)),
+            'final_collisions': int(final_snapshot.get('collisions', 0)),
+            'hazard_debug_stats': dict(hazard_debug_stats),
+            'hazard_recall_indicators': {
+                'static_hazard_detection_rate': float(hazard_debug_stats.get('sampled_static_hazard_frames', 0)) / sampled,
+                'proximity_detection_rate': float(hazard_debug_stats.get('sampled_proximity_frames', 0)) / sampled,
+                'guard_application_rate': float(hazard_debug_stats.get('sampled_guard_applied_frames', 0)) / sampled,
+                'wall_barrier_mention_rate': float(hazard_debug_stats.get('sampled_wall_barrier_mentions', 0)) / sampled,
+            },
+            'latest_scene_excerpt': str(final_snapshot.get('planner_scene_excerpt', '')),
+            'latest_objects_excerpt': str(final_snapshot.get('planner_objects_excerpt', '')),
+            'latest_intent_excerpt': str(final_snapshot.get('planner_intent_excerpt', '')),
+        }
+
+        summary_path = scenario_img_dir / 'hazard_debug_summary.json'
+        with summary_path.open('w', encoding='utf-8') as f:
+            json.dump(summary_payload, f, indent=2)
     
     def run_tests(
         self,
         scenario_ids: list = None,
-        max_steps: int = 1000
+        max_steps: int = 100
     ):
         """
         Run multiple test scenarios.

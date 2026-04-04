@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: b5gupta-gpu-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-server
+  template:
+    metadata:
+      labels:
+        app: test-server
+    spec:
+      containers:
+      - name: gpu-test
+        image: verlai/verl:app-verl0.5-transformers4.55.4-vllm0.10.0-mcore0.13.0-te2.2
+        ports:
+        - containerPort: 8000
+        resources:
+          limits:
+            nvidia.com/a100: 1
+            memory: 64Gi
+            cpu: 4
+          requests:
+            nvidia.com/a100: 1
+            memory: 64Gi
+            cpu: 4
+        command:
+          - "sh"
+          - "-c"
+          - |
+            echo 'Pod ready' && \
+            sleep infinity
+        volumeMounts:
+        # - name: <YOUR_VOLUME_NAME>
+        #   mountPath: /mymnt
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      # - name: <YOUR_VOLUME_NAME>
+      #   persistentVolumeClaim:
+      #     claimName: <YOUR_PVC_NAME>
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 8Gi

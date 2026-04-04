@@ -6,7 +6,7 @@ import torch
 from PIL import Image
 from transformers import AutoProcessor, AutoModelForVision2Seq
 
-MODEL_NAME = "Qwen/Qwen2.5-VL-3B-Instruct"
+MODEL_NAME = "Qwen/Qwen2.5-VL-7B-Instruct"
 DEVICE_DTYPE = torch.float16
 MAX_NEIGHBORS = 1
 PACK_MAX_BYTES = 2048

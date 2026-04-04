@@ -1,9 +1,97 @@
 """Visualization and plotting for metrics."""
 
 import json
+import logging
 from pathlib import Path
 from typing import Dict, List
 import numpy as np
+
+logger = logging.getLogger(__name__)
+
+
+class LiveMetricsTracer:
+    """Persist and optionally plot live route metrics during simulation."""
+
+    def __init__(self, output_dir: str, scenario_id: str, route_id: str):
+        self.output_dir = Path(output_dir) / 'live_traces' / scenario_id
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        self.route_id = route_id
+        self.history: List[Dict] = []
+
+        self.trace_path = self.output_dir / f'{route_id}_trace.jsonl'
+        self.latest_path = self.output_dir / f'{route_id}_latest.json'
+        self.plot_path = self.output_dir / f'{route_id}_live_metrics.png'
+
+        self._plot_unavailable = False
+
+    def update(self, snapshot: Dict):
+        """Append a live metrics snapshot and refresh derived outputs."""
+        self.history.append(snapshot)
+
+        with open(self.trace_path, 'a') as trace_file:
+            trace_file.write(json.dumps(snapshot) + '\n')
+
+        with open(self.latest_path, 'w') as latest_file:
+            json.dump(snapshot, latest_file, indent=2)
+
+        self._plot_history()
+
+    def _plot_history(self):
+        """Render an updating DS/RS trace plot when matplotlib is available."""
+        if self._plot_unavailable or not self.history:
+            return
+
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            self._plot_unavailable = True
+            logger.debug("Matplotlib unavailable; skipping live metrics plot generation")
+            return
+
+        steps = [point['step'] for point in self.history]
+        ds_values = [point['ds'] for point in self.history]
+        rs_values = [point['rs'] for point in self.history]
+        speed_values = [point['speed_mps'] for point in self.history]
+
+        fig, axes = plt.subplots(2, 1, figsize=(11, 8), sharex=True)
+        fig.suptitle(f'Live Metrics Trace: {self.route_id}', fontsize=14, fontweight='bold')
+
+        score_ax = axes[0]
+        score_ax.plot(steps, ds_values, label='DS', color='tab:blue', linewidth=2)
+        score_ax.plot(steps, rs_values, label='RS/RC', color='tab:green', linewidth=2)
+        score_ax.set_ylabel('Score')
+        score_ax.set_ylim(0, 105)
+        score_ax.grid(alpha=0.3)
+        score_ax.legend(loc='lower right')
+
+        speed_ax = axes[1]
+        speed_ax.plot(steps, speed_values, label='Speed (m/s)', color='tab:orange', linewidth=2)
+        speed_ax.set_xlabel('Simulation Step')
+        speed_ax.set_ylabel('Speed (m/s)')
+        speed_ax.grid(alpha=0.3)
+
+        latest = self.history[-1]
+        stats_text = (
+            f"Step: {latest['step']}\n"
+            f"DS: {latest['ds']:.1f}\n"
+            f"RS: {latest['rs']:.1f}%\n"
+            f"Collisions: {latest['collisions']}\n"
+            f"Violations: {latest['violations']}"
+        )
+        score_ax.text(
+            0.02,
+            0.05,
+            stats_text,
+            transform=score_ax.transAxes,
+            fontsize=10,
+            verticalalignment='bottom',
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.85)
+        )
+
+        fig.tight_layout()
+        fig.savefig(self.plot_path, dpi=160, bbox_inches='tight')
+        plt.close(fig)
 
 
 class MetricsVisualizer:

@@ -48,6 +48,8 @@ class VLMPlannerSpeedCurvature:
         
         self.IMAGE_PLACEHOLDER = "<IMAGE_PLACEHOLDER>"
         self._zero_deadlock_streak = 0
+        self._static_hazard_streak = 0
+        self._last_static_hazard_side = "none"
     
     def forward(self, perception_memory_bank: List[Dict], model_config: Dict) -> List[Dict]:
         """
@@ -74,22 +76,27 @@ class VLMPlannerSpeedCurvature:
         # Step 2: Chain-of-Thought reasoning
         front_image = perception_memory_bank[-1]['front_image']
         
-        prompt_template = model_config.get('planning', {}).get('prompt_template', {})
+        planning_config = model_config.get('planning', {})
+        prompt_template = planning_config.get('prompt_template', {})
+        prompt_usage = planning_config.get('prompt_usage', {})
 
         scene_description = self._get_scene_description(
             front_image, 
-            prompt_template
+            prompt_template,
+            prompt_usage
         )
         
         object_description = self._get_objects_description(
             front_image,
-            prompt_template
+            prompt_template,
+            prompt_usage
         )
         
         intent_description = self._get_intent_description(
             front_image,
             perception_memory_bank[-1]['target'][agent_idx],
-            prompt_template
+            prompt_template,
+            prompt_usage
         )
         
         # Step 3: Combined prediction
@@ -103,15 +110,26 @@ class VLMPlannerSpeedCurvature:
             intent_description,
             ego_history_json,
             target_description,
-            prompt_template
+            prompt_template,
+            prompt_usage
         )
         
         return [result]
 
-    def _resolve_prompt(self, prompt_template: Dict, candidates: List[str], fallback: str) -> str:
+    def _resolve_prompt(self, prompt_template: Dict, prompt_usage: Dict,
+                        candidates: List[str], usage_candidates: List[str],
+                        fallback: str) -> str:
         """Resolve prompt text from multiple possible keys and value shapes."""
         if not isinstance(prompt_template, dict):
             return fallback
+
+        desired_variant = None
+        if isinstance(prompt_usage, dict):
+            for usage_key in usage_candidates:
+                usage_value = prompt_usage.get(usage_key)
+                if isinstance(usage_value, str) and usage_value.strip():
+                    desired_variant = usage_value.strip()
+                    break
 
         for key in candidates:
             if key not in prompt_template:
@@ -123,6 +141,11 @@ class VLMPlannerSpeedCurvature:
                 return value
 
             if isinstance(value, dict):
+                if desired_variant:
+                    subval = value.get(desired_variant)
+                    if isinstance(subval, str) and subval.strip():
+                        return subval
+
                 for subkey in ("concise", "default", "text"):
                     subval = value.get(subkey)
                     if isinstance(subval, str) and subval.strip():
@@ -195,6 +218,14 @@ class VLMPlannerSpeedCurvature:
         if image is None:
             raise ValueError("Image is None")
         
+        # Image validation
+        logger.debug(f"[IMAGE VALIDATION] Shape: {image.shape}, dtype: {image.dtype}")
+        logger.debug(f"[IMAGE VALIDATION] Value range: [{image.min()}, {image.max()}], mean: {image.mean():.1f}")
+        
+        # Check if image looks blank (all same values)
+        if image.std() < 1.0:
+            logger.warning(f"[IMAGE VALIDATION] WARNING: Image may be blank (std={image.std():.3f})")
+        
         # Convert to PIL Image
         pil_image = Image.fromarray(image.astype(np.uint8))
         
@@ -202,18 +233,26 @@ class VLMPlannerSpeedCurvature:
         buffer = BytesIO()
         pil_image.save(buffer, format='PNG')
         img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        logger.debug(f"[IMAGE VALIDATION] Encoded size: {len(img_base64)} bytes")
         
         return img_base64
     
-    def _get_scene_description(self, image: np.ndarray, prompt_template: Dict) -> str:
+    def _get_scene_description(self, image: np.ndarray, prompt_template: Dict,
+                               prompt_usage: Dict) -> str:
         """Get scene description using CoT."""
         try:
             img_base64 = self._encode_image(image)
 
             scene_prompt = self._resolve_prompt(
                 prompt_template,
-                ["scene"],
-                "Describe the driving scenario, including weather, traffic, and road conditions."
+                prompt_usage,
+                ["scene", "scene_prompt_template"],
+                ["scene_prompt_template", "scene", "scene_prompt"],
+                (
+                    "Describe the driving scenario, including lane geometry, road direction, weather, traffic, and whether the drivable path continues straight or bends. "
+                    "Explicitly state lane boundaries and roadside structures (wall, barrier, curb, guardrail, fence) and whether any are intruding into the drivable path. "
+                    "Classify road geometry as straight, gentle-left, gentle-right, sharp-left, or sharp-right and mention drift risk (left/right/none)."
+                )
             )
             scene_prompt = scene_prompt.replace(self.IMAGE_PLACEHOLDER, "")
             
@@ -246,15 +285,24 @@ class VLMPlannerSpeedCurvature:
             logger.warning(f"Scene description failed: {e}")
             return "Clear conditions, standard road layout."
     
-    def _get_objects_description(self, image: np.ndarray, prompt_template: Dict) -> str:
+    def _get_objects_description(self, image: np.ndarray, prompt_template: Dict,
+                                 prompt_usage: Dict) -> str:
         """Get object detection using CoT."""
         try:
             img_base64 = self._encode_image(image)
 
             object_prompt = self._resolve_prompt(
                 prompt_template,
-                ["objects", "default"],
-                "Identify important road users in the driving scene. List two or three of them with their location and a short description of their status and intent."
+                prompt_usage,
+                ["objects", "object_prompt_template", "default"],
+                ["object_prompt_template", "objects", "object_prompt"],
+                (
+                    "Identify only traffic-relevant road users or obstacles that could affect the ego vehicle soon. "
+                    "Include static hazards such as wall, barrier, curb, guardrail, fence, parked vehicle, cone, debris, or blocked lane edge. "
+                    "Do not mark curb/guardrail/fence/wall as lane-blocking if they remain outside lane boundaries and run parallel to the road. "
+                    "For each item, provide side (left/right/center), approximate distance (near/mid/far), and whether it intrudes into the ego lane. "
+                    "List two or three highest-risk items."
+                )
             )
             object_prompt = object_prompt.replace(self.IMAGE_PLACEHOLDER, "")
             
@@ -288,7 +336,7 @@ class VLMPlannerSpeedCurvature:
             return "No significant objects detected."
     
     def _get_intent_description(self, image: np.ndarray, target: List[float], 
-                                prompt_template: Dict) -> str:
+                                prompt_template: Dict, prompt_usage: Dict) -> str:
         """Get driving intent using CoT."""
         try:
             img_base64 = self._encode_image(image)
@@ -298,8 +346,17 @@ class VLMPlannerSpeedCurvature:
 
             intent_prompt = self._resolve_prompt(
                 prompt_template,
-                ["intent", "default"],
-                "Should you turn left, turn right, go straight, slightly adjust direction, accelerate, or decelerate? Describe how you would navigate the vehicle to reach the target."
+                prompt_usage,
+                ["intent", "intention_prompt_template", "intent_prompt_template", "default"],
+                ["intention_prompt_template", "intent_prompt_template", "intent", "intention"],
+                (
+                    "You are planning in ego-relative coordinates. The target description states lateral offset "
+                    "(left or right) and longitudinal offset (front or back). If the target is mostly ahead and the "
+                    "lateral offset is small, keep going straight with only slight steering corrections. Prefer staying "
+                    "centered in the lane over aggressively cutting toward the waypoint. Should you turn left, turn right, "
+                    "go straight, slightly adjust direction, accelerate, or decelerate? Describe how you would navigate "
+                    "the vehicle to reach the target safely."
+                )
             )
             intent_prompt = intent_prompt.replace(self.IMAGE_PLACEHOLDER, "")
             intent_prompt = intent_prompt.replace("{target_description}", target_desc)
@@ -335,18 +392,33 @@ class VLMPlannerSpeedCurvature:
     
     def _get_target_description(self, target: List[float]) -> str:
         """Format target waypoint description."""
-        x_distance = abs(target[0])
-        y_distance = abs(target[1])
-        
-        x_direction = "left" if target[0] < 0 else "right"
-        y_direction = "front" if target[1] > 0 else "rear"
-        
-        return f"The target is {x_distance:.1f} meters to your {x_direction} and {y_distance:.1f} meters to your {y_direction}."
+        x = float(target[0])
+        y = -float(target[1])
+
+        lateral_distance = abs(round(x, 5))
+        longitudinal_distance = abs(round(y, 5))
+
+        if lateral_distance < 1.0:
+            lateral_phrase = "approximately centered in your lane"
+        else:
+            lateral_direction = "right" if x > 0 else "left"
+            lateral_phrase = f"{lateral_distance:.1f} meters to your {lateral_direction}"
+
+        if longitudinal_distance < 1.0:
+            longitudinal_phrase = "roughly level with your current position"
+        else:
+            longitudinal_direction = "front" if y > 0 else "back"
+            longitudinal_phrase = f"{longitudinal_distance:.1f} meters to your {longitudinal_direction}"
+
+        return (
+            "The target waypoint is given in ego-relative coordinates: lateral offset means left/right and "
+            f"longitudinal offset means front/back. The target is {lateral_phrase} and {longitudinal_phrase}."
+        )
     
     def _predict_speed_curvature(self, image: np.ndarray, scene_desc: str,
                                  object_desc: str, intent_desc: str,
                                  ego_history: str, target_desc: str,
-                                 prompt_template: Dict) -> Dict:
+                                 prompt_template: Dict, prompt_usage: Dict) -> Dict:
         """
         Final prediction step: combine all context to predict speed and curvature.
         
@@ -359,7 +431,9 @@ class VLMPlannerSpeedCurvature:
             # Combined prompt - use ORIGINAL placeholder names
             comb_prompt = self._resolve_prompt(
                 prompt_template,
-                ["prediction"],
+                prompt_usage,
+                ["prediction", "comb_prompt", "combined_prompt"],
+                ["comb_prompt", "prediction", "prediction_prompt"],
                 (
                     "You are an autonomous driving vehicle controller. "
                     "You have access to a front-view camera image. <IMAGE_PLACEHOLDER>\n"
@@ -371,13 +445,20 @@ class VLMPlannerSpeedCurvature:
                     "- Collaborative agents' information are described as follows: {collab_agent_description}\n"
                     "{target_description}\n"
                     "Generate the vehicle's desired speed and curvature for the next 5 timestamps, ensuring safe and efficient movement towards the target.\n"
-                    "- Speed (m/s): Range [0, 20]\n"
-                    "- Curvature (degree/m): Range [-180, 180]\n"
-                    "- Negative curvature = turning left\n"
-                    "- Positive curvature = turning right\n"
-                    "- Ensure traffic rule compliance\n"
-                    "- Numerical values must be integers.\n"
-                    "- Avoid collisions by slowing down or changing lanes.\n"
+                    "Use smooth but decisive control. First estimate road curvature from lane boundaries over the next 20-40 meters. "
+                    "Map geometry to curvature magnitude: straight near zero, gentle turns small consistent curvature, sharp/intersection turns larger curvature. "
+                    "On straight roads, or when the target is mostly ahead with a small lateral offset, keep curvature close to 0. "
+                    "Only use large curvature for clear bends, intersection turns, or obstacle avoidance. "
+                    "If drifting right on a straight road, apply slight left correction; if drifting left, apply slight right correction. "
+                    "If uncertain or visually ambiguous, prefer near-zero curvature instead of persistent one-sided steering.\n"
+                    "- Speed (m/s): Range [0, 20], integer or decimal values\n"
+                    "- Curvature (degree/m): Range [-180, 180], integer or decimal values\n"
+                    "- Negative curvature = turning left (counter-clockwise)\n"
+                    "- Positive curvature = turning right (clockwise)\n"
+                    "- Zero curvature = going straight ahead\n"
+                    "- Keep the vehicle centered in the drivable lane and do not steer toward the shoulder or sidewalk.\n"
+                    "- Ensure traffic rule compliance and avoid collisions\n"
+                    "- Avoid collisions by slowing down or steering away from obstacles.\n"
                     'Output MUST be a valid JSON structure with the key "predicted_speeds_curvatures" containing a list of 5 [speed, curvature] pairs.\n'
                     "```json\n"
                     "{\n"
@@ -402,6 +483,12 @@ class VLMPlannerSpeedCurvature:
             logger.info(f"  ego_history exists: {bool(ego_history)}, len={len(ego_history) if ego_history else 0}")
             logger.info(f"  intent_desc exists: {bool(intent_desc)}, len={len(intent_desc) if intent_desc else 0}")
             logger.info(f"  target_desc exists: {bool(target_desc)}, len={len(target_desc) if target_desc else 0}")
+            
+            # Log actual descriptions for debugging VLM confusion
+            logger.info(f"[SCENE DESCRIPTION] {scene_desc[:200]}")
+            logger.info(f"[OBJECT DESCRIPTION] {object_desc[:200]}")
+            logger.info(f"[INTENT DESCRIPTION] {intent_desc[:200]}")
+            logger.info(f"[EGO HISTORY] {ego_history[:200]}")
             
             comb_prompt = comb_prompt.replace("{scene_description}", scene_desc)
             comb_prompt = comb_prompt.replace("{object_description}", object_desc)  # SINGULAR
@@ -478,8 +565,36 @@ class VLMPlannerSpeedCurvature:
                     float(parsed_result['target_speed'][0])
                 )
 
+            # Generic safety guard: if text context indicates a nearby static obstacle but
+            # planned control is nearly straight/fast, inject a mild evasive profile.
+            guarded_result, guard_applied, guard_reason, guard_signals = self._apply_static_obstacle_safety_guard(
+                parsed_result,
+                scene_desc,
+                object_desc,
+                intent_desc
+            )
+            if guard_applied:
+                parsed_result = guarded_result
+                logger.warning(
+                    "Applied static-obstacle safety guard | reason=%s | speed=%.2f | curvature=%.2f",
+                    guard_reason,
+                    float(parsed_result['target_speed'][0]),
+                    float(parsed_result['curvature'][0])
+                )
+
+            parsed_result['_debug'] = {
+                'scene_description': scene_desc,
+                'object_description': object_desc,
+                'intent_description': intent_desc,
+                'zero_deadlock_streak': int(self._zero_deadlock_streak),
+                'zero_override_candidate': bool(should_override),
+                'static_guard_applied': bool(guard_applied),
+                'static_guard_reason': guard_reason,
+                'hazard_signals': guard_signals,
+            }
+
             logger.info(f"Predicted: speed={parsed_result['target_speed'][0]:.2f} m/s, "
-                       f"curvature={parsed_result['curvature'][0]:.3f} rad/m")
+                       f"curvature={parsed_result['curvature'][0]:.3f} degrees")
             
             return parsed_result
             
@@ -548,10 +663,12 @@ class VLMPlannerSpeedCurvature:
                         logger.info(f"[RAW VALUES] speeds={speeds}, curvatures={curvatures}")
                         
                         # Clamp to reasonable ranges
+                        # Speeds: [0, 20] m/s
+                        # Curvatures: [-180, 180] degrees (steering angle range)
                         speeds = [max(0.0, min(20.0, s)) for s in speeds]
-                        curvatures = [max(-0.5, min(0.5, c)) for c in curvatures]
+                        curvatures = [max(-180.0, min(180.0, c)) for c in curvatures]
                         
-                        logger.info(f"Successfully parsed: speeds={speeds}, curvatures={curvatures}")
+                        logger.info(f"Successfully parsed: speeds={speeds}, curvatures={curvatures} degrees")
                         
                         return {
                             'target_speed': speeds,
@@ -572,9 +689,9 @@ class VLMPlannerSpeedCurvature:
                     curvatures = [float(numbers[i*2+1]) for i in range(5)]
                     
                     speeds = [max(0.0, min(20.0, s)) for s in speeds]
-                    curvatures = [max(-0.5, min(0.5, c)) for c in curvatures]
+                    curvatures = [max(-180.0, min(180.0, c)) for c in curvatures]
                     
-                    logger.info(f"Extracted via regex: speeds={speeds}, curvatures={curvatures}")
+                    logger.info(f"Extracted via regex: speeds={speeds}, curvatures={curvatures} degrees")
                     
                     return {
                         'target_speed': speeds,
@@ -645,6 +762,123 @@ class VLMPlannerSpeedCurvature:
             'curvature': [0.0, 0.0, 0.0, 0.0, 0.0],
             'dt': 0.5
         }
+
+    def _apply_static_obstacle_safety_guard(self, prediction: Dict, scene_desc: str,
+                                            object_desc: str, intent_desc: str):
+        """Apply a generic evasive fallback when static obstacles are likely near ego lane."""
+        speeds = prediction.get('target_speed', [])
+        curvatures = prediction.get('curvature', [])
+        if not speeds or not curvatures:
+            return prediction, False, "empty_prediction", {
+                'has_static_hazard': False,
+                'has_proximity_cue': False,
+                'has_dynamic_conflict': False,
+                'hazard_side': 'none'
+            }
+
+        scene_text = (scene_desc or '').lower()
+        object_text = (object_desc or '').lower()
+        intent_text = (intent_desc or '').lower()
+        combined = f"{scene_text} {object_text}"
+
+        static_tokens = (
+            "wall", "barrier", "guardrail", "curb", "fence", "bollard", "concrete",
+            "parked vehicle", "parked car", "cone", "debris", "block", "blocked"
+        )
+        proximity_tokens = ("near", "close", "immediate", "very near", "adjacent")
+        dynamic_tokens = ("pedestrian", "cyclist", "vehicle", "truck", "motorcycle", "car ahead")
+        lane_intrusion_tokens = (
+            "intrudes into ego lane",
+            "in ego lane",
+            "blocks ego lane",
+            "blocking ego lane",
+            "blocks lane center",
+            "blocking lane center",
+            "occupies lane",
+            "lane blocked"
+        )
+
+        has_static_hazard = any(tok in combined for tok in static_tokens)
+        has_proximity_cue = any(tok in combined for tok in proximity_tokens)
+        has_dynamic_conflict = any(tok in combined for tok in dynamic_tokens)
+        has_lane_intrusion = any(tok in combined for tok in lane_intrusion_tokens)
+
+        # Keep this guard focused on static obstacle misses; do not override strong
+        # dynamic-object intent that is already handled by the VLM output.
+        left_tokens = ("left wall", "left barrier", "left curb", "left guardrail", "left side")
+        right_tokens = ("right wall", "right barrier", "right curb", "right guardrail", "right side")
+        left_detected = any(tok in combined for tok in left_tokens)
+        right_detected = any(tok in combined for tok in right_tokens)
+
+        hazard_side = 'none'
+        if left_detected and not right_detected:
+            hazard_side = 'left'
+        elif right_detected and not left_detected:
+            hazard_side = 'right'
+        elif left_detected and right_detected:
+            hazard_side = 'ambiguous'
+        elif has_static_hazard:
+            hazard_side = 'unspecified'
+
+        signals = {
+            'has_static_hazard': bool(has_static_hazard),
+            'has_proximity_cue': bool(has_proximity_cue),
+            'has_dynamic_conflict': bool(has_dynamic_conflict),
+            'has_lane_intrusion': bool(has_lane_intrusion),
+            'hazard_side': hazard_side,
+        }
+
+        if hazard_side == 'ambiguous':
+            self._static_hazard_streak = 0
+            self._last_static_hazard_side = 'none'
+            return prediction, False, "ambiguous_hazard_side", signals
+
+        if not has_static_hazard or not has_proximity_cue or has_dynamic_conflict or not has_lane_intrusion:
+            self._static_hazard_streak = 0
+            self._last_static_hazard_side = 'none'
+            return prediction, False, "not_applicable", signals
+
+        if hazard_side != self._last_static_hazard_side:
+            self._static_hazard_streak = 1
+            self._last_static_hazard_side = hazard_side
+        else:
+            self._static_hazard_streak += 1
+
+        signals['hazard_streak'] = int(self._static_hazard_streak)
+
+        if self._static_hazard_streak < 2:
+            return prediction, False, "awaiting_temporal_confirmation", signals
+
+        current_speed = float(speeds[0])
+        current_curv = float(curvatures[0])
+        mostly_straight = abs(current_curv) < 1.5
+        too_fast_for_hazard = current_speed > 8.0
+
+        if not (mostly_straight and too_fast_for_hazard):
+            return prediction, False, "control_already_cautious", signals
+
+        if any(tok in combined for tok in ("left wall", "left barrier", "left curb", "left side")):
+            turn_dir = 1.0   # right
+            reason = "static_hazard_left"
+        elif any(tok in combined for tok in ("right wall", "right barrier", "right curb", "right side")):
+            turn_dir = -1.0  # left
+            reason = "static_hazard_right"
+        elif "turn left" in intent_text:
+            turn_dir = -1.0
+            reason = "intent_left_with_static_hazard"
+        elif "turn right" in intent_text:
+            turn_dir = 1.0
+            reason = "intent_right_with_static_hazard"
+        else:
+            turn_dir = 1.0
+            reason = "static_hazard_unspecified_side"
+
+        guarded = {
+            'target_speed': [min(current_speed, 7.0), 6.5, 6.0, 6.5, 7.0],
+            'curvature': [2.0 * turn_dir, 3.0 * turn_dir, 2.5 * turn_dir, 2.0 * turn_dir, 1.5 * turn_dir],
+            'dt': prediction.get('dt', 0.5)
+        }
+        return guarded, True, reason, signals
     
     def _get_default_prediction(self) -> Dict:
         """Default prediction when VLM fails."""

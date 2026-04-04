@@ -4,7 +4,33 @@ Based on LangCoop's VLMControllerSpeedCurvature.
 """
 
 import numpy as np
+from collections import deque
 from typing import Dict
+
+
+class PIDController:
+    """Window-based PID controller similar to upstream LangCoop control."""
+
+    def __init__(self, kp: float, ki: float, kd: float, window_size: int = 20):
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+        self.window = deque(maxlen=window_size)
+
+    def step(self, error: float) -> float:
+        self.window.append(float(error))
+
+        if len(self.window) >= 2:
+            integral = float(np.mean(self.window))
+            derivative = float(self.window[-1] - self.window[-2])
+        else:
+            integral = 0.0
+            derivative = 0.0
+
+        return self.kp * error + self.ki * integral + self.kd * derivative
+
+    def reset(self):
+        self.window.clear()
 
 
 class LangCoopController:
@@ -15,22 +41,30 @@ class LangCoopController:
     
     def __init__(self, **kwargs):
         """Initialize controller with PID gains."""
-        # Speed control PID gains
-        self.speed_kp = kwargs.get('speed_kp', 0.8)
-        self.speed_ki = kwargs.get('speed_ki', 0.1)
-        self.speed_kd = kwargs.get('speed_kd', 0.2)
-        
-        # Steering control gains
-        self.steer_kp = kwargs.get('steer_kp', 1.0)
-        
-        # Integral error tracking
-        self.speed_error_integral = 0.0
-        self.prev_speed_error = 0.0
-        
-        # Limits
-        self.max_throttle = 1.0
-        self.max_brake = 1.0
-        self.max_steer = 1.0
+        turn_kp = kwargs.get('turn_kp', kwargs.get('steer_kp', 1.0))
+        turn_ki = kwargs.get('turn_ki', 0.2)
+        turn_kd = kwargs.get('turn_kd', 0.1)
+        turn_n = kwargs.get('turn_n', 30)
+
+        speed_kp = kwargs.get('speed_kp', 5.0)
+        speed_ki = kwargs.get('speed_ki', 1.0)
+        speed_kd = kwargs.get('speed_kd', 0.1)
+        speed_n = kwargs.get('speed_n', 5)
+
+        self.turn_controller = PIDController(turn_kp, turn_ki, turn_kd, window_size=turn_n)
+        self.speed_controller = PIDController(speed_kp, speed_ki, speed_kd, window_size=speed_n)
+
+        self.clip_delta = float(kwargs.get('clip_delta', 0.35))
+        self.brake_ratio = float(kwargs.get('brake_ratio', 1.1))
+        self.brake_speed = float(kwargs.get('brake_speed', 0.1))
+        # CRITICAL: Curvature scaling matches upstream LangCoop
+        # Upstream: curvature (degrees) / 10 → deg2rad(-90/10) → -0.157 rad
+        # We do: curvature * scale, so scale = π/(180*10) ≈ 0.001745
+        self.curvature_scale = float(kwargs.get('curvature_scale', 0.001745))
+
+        self.max_throttle = float(kwargs.get('max_throttle', 0.75))
+        self.max_brake = float(kwargs.get('max_brake', 1.0))
+        self.max_steer = float(kwargs.get('max_steer', 1.0))
         
     def run_step(self, route_info: Dict, curr_speed: float, buffer_idx: int = 0) -> Dict:
         """
@@ -58,34 +92,21 @@ class LangCoopController:
         else:
             curvature = float(curvatures)
         
-        # Speed control (PID)
-        speed_error = target_speed - curr_speed
-        
-        # Proportional
-        throttle = self.speed_kp * speed_error
-        
-        # Integral
-        self.speed_error_integral += speed_error * 0.05  # dt = 0.05s
-        throttle += self.speed_ki * self.speed_error_integral
-        
-        # Derivative
-        speed_error_derivative = (speed_error - self.prev_speed_error) / 0.05
-        throttle += self.speed_kd * speed_error_derivative
-        
-        self.prev_speed_error = speed_error
-        
-        # Split throttle/brake
-        brake = 0.0
-        if throttle < 0:
-            brake = min(-throttle, self.max_brake)
-            throttle = 0.0
-        else:
-            throttle = min(throttle, self.max_throttle)
-        
-        # Steering from curvature
-        # curvature = 1/radius, negative = turn right, positive = turn left
-        steer = self.steer_kp * curvature
+        steer = self.turn_controller.step(curvature * self.curvature_scale)
         steer = max(-self.max_steer, min(self.max_steer, steer))
+
+        speed_delta = float(np.clip(target_speed - curr_speed, 0.0, self.clip_delta))
+        throttle = self.speed_controller.step(speed_delta)
+        throttle = float(np.clip(throttle, 0.0, self.max_throttle))
+
+        brake = 0.0
+        if target_speed < self.brake_speed:
+            brake = self.max_brake
+            throttle = 0.0
+        elif curr_speed > target_speed * self.brake_ratio:
+            overspeed = curr_speed - target_speed
+            brake = float(np.clip(overspeed / max(curr_speed, 1e-3), 0.0, self.max_brake))
+            throttle = 0.0
         
         return {
             'throttle': float(throttle),
@@ -95,5 +116,5 @@ class LangCoopController:
     
     def reset(self):
         """Reset integral error."""
-        self.speed_error_integral = 0.0
-        self.prev_speed_error = 0.0
+        self.turn_controller.reset()
+        self.speed_controller.reset()

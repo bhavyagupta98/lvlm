@@ -34,15 +34,21 @@ planning:
       concise: |
         You are an autonomous driving vehicle controller. 
         You have access to a front-view camera image. <IMAGE_PLACEHOLDER>
-        Describe the driving scenario, including weather, traffic, and road conditions.
+        Describe the driving scenario, including lane geometry, road direction, weather, traffic, and whether the drivable path continues straight or bends.
+        Explicitly describe lane boundaries and roadside structures (wall, barrier, curb, guardrail, fence), and whether any intrude into the drivable lane.
+        Explicitly classify road geometry as one of: straight, gentle-left, gentle-right, sharp-left, sharp-right.
+        State whether lane centerline trend suggests drift risk (left drift, right drift, none).
         Please be very concise.
     
     object_prompt_template:
       concise: |
         You are an autonomous driving vehicle controller. 
         You have access to a front-view camera image. <IMAGE_PLACEHOLDER>
-        Identify important road users in the driving scene. 
-        List two or three of them with their location and a short description of their status and intent.
+        Identify only traffic-relevant road users or obstacles that could affect the ego vehicle soon.
+        Include static hazards: wall, barrier, curb, guardrail, fence, parked vehicle, construction cones, debris, blocked lane edge.
+        Important: do not mark curb/guardrail/fence/wall as lane-blocking if they run parallel outside lane boundaries.
+        For each item, include side (left/right/center), distance (near/mid/far), and whether it blocks or intrudes into the ego lane/path.
+        List two or three highest-risk items.
         Please be very concise.
 
     intention_prompt_template:
@@ -53,8 +59,15 @@ planning:
         - Avoid collisions: If a car is ahead, slow down or change lanes.
         You have access to a front-view camera image. <IMAGE_PLACEHOLDER>
         {target_description}
+        The target is expressed in ego-relative coordinates: lateral offset means left or right, and longitudinal offset means front or back.
+        If the target is mostly ahead and the lateral offset is small, keep going straight with only slight steering corrections.
+        Prefer staying centered in the lane over aggressively cutting toward the waypoint.
+        If road geometry is straight, use near-zero curvature and actively correct lane drift:
+        - drifting right -> slight left correction
+        - drifting left -> slight right correction
+        Do not keep a persistent same-direction steering bias on straight roads.
         Should you turn left, turn right, go straight, slightly adjust direction, accelerate, or decelerate?
-        Describe how you would navigate the vehicle to reach the target. 
+        Describe how you would navigate the vehicle to reach the target safely. 
         Please be very concise.
 
     target_prompt_template:
@@ -74,6 +87,18 @@ planning:
         {target_description}
         
         Based on this information, predict the vehicle's speed (m/s) and curvature (rad/m) for the next 5 timesteps (0.5s each).
+        Use smooth but decisive control.
+        First estimate road curvature from lane boundaries over the next 20-40 meters.
+        Map geometry to curvature magnitude:
+        - straight: near zero curvature
+        - gentle turn: small consistent curvature
+        - sharp turn/intersection: larger curvature
+        - On straight roads, or when the target is mostly ahead with only a small lateral offset, keep curvature close to 0.
+        - Only use large curvature for a clear bend, intersection turn, or obstacle avoidance.
+        - On straight roads, if ego drifts right, apply small negative curvature (left correction).
+        - On straight roads, if ego drifts left, apply small positive curvature (right correction).
+        - If uncertain, prefer curvature near zero rather than persistent one-sided steering.
+        - Stay centered in the drivable lane and do not steer toward the shoulder or sidewalk.
         
         Output format (JSON):
         {
@@ -87,7 +112,7 @@ planning:
         }
         
         Speed range: [0, 20] m/s
-        Curvature range: typical values are [-0.5, 0.5] rad/m (negative = right turn, positive = left turn)
+        Curvature range: typical values are [-0.5, 0.5] rad/m (negative = left turn, positive = right turn)
 
 perception:
   sensors:

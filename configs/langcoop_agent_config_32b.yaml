@@ -1,9 +1,11 @@
-# LangCoop Agent Configuration (CARLA 0.9.16 + Python 3.12)
+# LangCoop Agent Configuration - Qwen2.5-VL-72B-AWQ (CARLA 0.9.16 + Python 3.12)
+# Deploy with: carla_client_dev_4.yaml
+# 10x larger model with AWQ quantization = better reasoning
 
-# VLM Configuration (local vLLM)
+# VLM Configuration (local vLLM with 72B AWQ quantized model)
 vlm:
   enabled: true
-  api_model_name: "Qwen/Qwen2.5-VL-7B-Instruct-AWQ"
+  api_model_name: "Qwen/Qwen2.5-VL-72B-Instruct-AWQ"
   api_base_url: "http://localhost:8000/v1"
   api_key: "EMPTY"
 
