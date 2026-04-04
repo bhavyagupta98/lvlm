@@ -65,6 +65,13 @@ class Scenario:
     weather: Dict = None  # weather parameters
     traffic_density: float = 0.5  # 0-1 scale
     pedestrian_density: float = 0.3
+    background_vehicle_count: int = 0
+    background_walker_count: int = 0
+    ego_route_spacing: int = 1
+    ego_spawn_mode: str = "route_spacing"
+    ego_spawn_route_index: int = 0
+    focus_background_near_egos: bool = False
+    background_spawn_radius: float = 60.0
     difficulty: str = "moderate"  # easy, moderate, hard
     description: str = ""
     
@@ -170,6 +177,13 @@ class ScenarioManager:
             weather=scenario_dict.get('weather'),
             traffic_density=scenario_dict.get('traffic_density', 0.5),
             pedestrian_density=scenario_dict.get('pedestrian_density', 0.3),
+            background_vehicle_count=scenario_dict.get('background_vehicle_count', 0),
+            background_walker_count=scenario_dict.get('background_walker_count', 0),
+            ego_route_spacing=scenario_dict.get('ego_route_spacing', 1),
+            ego_spawn_mode=scenario_dict.get('ego_spawn_mode', 'route_spacing'),
+            ego_spawn_route_index=scenario_dict.get('ego_spawn_route_index', 0),
+            focus_background_near_egos=scenario_dict.get('focus_background_near_egos', False),
+            background_spawn_radius=scenario_dict.get('background_spawn_radius', 60.0),
             difficulty=scenario_dict.get('difficulty', 'moderate'),
             description=scenario_dict.get('description', '')
         )
@@ -238,6 +252,13 @@ class ScenarioManager:
                 'weather': scenario.weather,
                 'traffic_density': scenario.traffic_density,
                 'pedestrian_density': scenario.pedestrian_density,
+                'background_vehicle_count': scenario.background_vehicle_count,
+                'background_walker_count': scenario.background_walker_count,
+                'ego_route_spacing': scenario.ego_route_spacing,
+                'ego_spawn_mode': scenario.ego_spawn_mode,
+                'ego_spawn_route_index': scenario.ego_spawn_route_index,
+                'focus_background_near_egos': scenario.focus_background_near_egos,
+                'background_spawn_radius': scenario.background_spawn_radius,
                 'difficulty': scenario.difficulty,
                 'description': scenario.description
             }

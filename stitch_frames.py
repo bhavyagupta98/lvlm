@@ -13,7 +13,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def stitch_frames_to_video(image_dir: Path, output_path: Path, fps: int = 20, codec: str = 'mp4v'):
+def stitch_frames_to_video(image_dir: Path, output_path: Path, fps: int = 5, codec: str = 'mp4v'):
     """
     Stitch frame images into an MP4 video.
     
@@ -108,7 +108,7 @@ def stitch_frames_to_video(image_dir: Path, output_path: Path, fps: int = 20, co
     return True
 
 
-def stitch_frames_to_gif(image_dir: Path, output_path: Path, fps: int = 20, downsample: int = 1):
+def stitch_frames_to_gif(image_dir: Path, output_path: Path, fps: int = 5, downsample: int = 1):
     """
     Stitch frame images into an animated GIF.
     
@@ -181,6 +181,12 @@ def main():
         help="Output filename (default: <scenario_name>.mp4 or .gif)"
     )
     parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Optional explicit output directory for generated video/gif files"
+    )
+    parser.add_argument(
         "--format",
         type=str,
         choices=["mp4", "gif", "both"],
@@ -190,8 +196,8 @@ def main():
     parser.add_argument(
         "--fps",
         type=int,
-        default=20,
-        help="Frames per second (default: 20)"
+        default=5,
+        help="Frames per second (default: 5)"
     )
     parser.add_argument(
         "--downsample",
@@ -216,7 +222,7 @@ def main():
         logger.info(f"Found {len(frame_files)} frame images in {images_dir}")
         
         # Create output directory
-        output_dir = images_dir / "videos"
+        output_dir = Path(args.output_dir) if args.output_dir else images_dir / "videos"
         output_dir.mkdir(parents=True, exist_ok=True)
         
         # Determine output filename
@@ -258,7 +264,7 @@ def main():
         logger.info(f"Found {len(scenario_dirs)} scenario directories")
         
         # Create output directory
-        output_dir = images_dir / "videos"
+        output_dir = Path(args.output_dir) if args.output_dir else images_dir / "videos"
         output_dir.mkdir(parents=True, exist_ok=True)
         
         success = True

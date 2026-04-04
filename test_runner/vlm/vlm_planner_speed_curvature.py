@@ -116,6 +116,115 @@ class VLMPlannerSpeedCurvature:
         
         return [result]
 
+    def forward_collaborative(self, perception_memory_bank: List[Dict], model_config: Dict) -> List[Dict]:
+        """Collaborative multi-agent forward pass with shared image and intent context."""
+        if len(perception_memory_bank) < 2:
+            logger.warning("Not enough frames in collaborative perception memory bank")
+            return [self._get_default_prediction()]
+
+        latest = perception_memory_bank[-1]
+        targets = latest.get('target', [])
+        num_agents = len(targets)
+        if num_agents <= 0:
+            return [self._get_default_prediction()]
+
+        planning_config = model_config.get('planning', {})
+        prompt_template = planning_config.get('prompt_template', {})
+        prompt_usage = planning_config.get('prompt_usage', {})
+        sharing_modalities = model_config.get('collab', {}).get('sharing_modalities', [])
+
+        agent_intents = []
+        for agent_idx in range(num_agents):
+            front_image = self._get_agent_front_image(perception_memory_bank, agent_idx)
+            target_waypoint = latest['target'][agent_idx]
+            target_description = self._get_target_description(target_waypoint)
+            intent_description = self._get_intent_description(
+                front_image,
+                target_waypoint,
+                prompt_template,
+                prompt_usage
+            )
+            agent_intents.append({
+                'idx': agent_idx,
+                'position': latest['detmap_pose'][agent_idx][:2],
+                'intent_description': intent_description,
+                'front_image': front_image,
+            })
+
+        predictions = []
+        for agent_idx in range(num_agents):
+            front_image = self._get_agent_front_image(perception_memory_bank, agent_idx)
+            ego_history_json = self._get_ego_history(perception_memory_bank, agent_idx)
+            target_waypoint = latest['target'][agent_idx]
+            target_description = self._get_target_description(target_waypoint)
+
+            scene_description = self._get_scene_description(front_image, prompt_template, prompt_usage)
+            object_description = self._get_objects_description(front_image, prompt_template, prompt_usage)
+            ego_intent_description = agent_intents[agent_idx]['intent_description']
+
+            collab_description = ""
+            collab_images = [front_image]
+            for other_intent in agent_intents:
+                if other_intent['idx'] == agent_idx:
+                    continue
+                relative_position = self._get_related_pos_with_direction(
+                    ego_pos=latest['detmap_pose'][agent_idx][:2],
+                    ego_yaw=latest['ego_yaw'][agent_idx],
+                    positions=other_intent['position']
+                )
+                position_list = [round(float(coord), 5) for coord in np.asarray(relative_position).tolist()]
+                image_marker = self.IMAGE_PLACEHOLDER if 'image' in sharing_modalities else 'not shared'
+                intent_text = other_intent['intent_description'] if 'intent' in sharing_modalities else ''
+                collab_description += (
+                    f"Agent {other_intent['idx']}, located at: {position_list}, "
+                    f"intent description: {intent_text}, image: {image_marker}\n"
+                )
+                if 'image' in sharing_modalities:
+                    collab_images.append(other_intent['front_image'])
+
+            result = self._predict_speed_curvature(
+                collab_images,
+                scene_description,
+                object_description,
+                ego_intent_description,
+                ego_history_json,
+                target_description,
+                prompt_template,
+                prompt_usage,
+                collab_agent_description=collab_description,
+            )
+            predictions.append(result)
+
+        return predictions
+
+    def _get_agent_front_image(self, perception_memory_bank: List[Dict], agent_idx: int) -> np.ndarray:
+        """Retrieve one agent's front image from shared or single-agent memory."""
+        front_image = perception_memory_bank[-1]['front_image']
+        if isinstance(front_image, list):
+            return front_image[agent_idx]
+        if isinstance(front_image, np.ndarray) and front_image.ndim == 4:
+            return front_image[agent_idx]
+        return front_image
+
+    def _get_related_pos_with_direction(self, ego_pos, ego_yaw: float, positions):
+        """Convert other-agent global position into ego-relative coordinates."""
+        if isinstance(ego_pos, torch.Tensor):
+            ego_pos = ego_pos.detach().cpu().numpy()
+        if isinstance(positions, torch.Tensor):
+            positions = positions.detach().cpu().numpy()
+
+        ego_pos = np.asarray(ego_pos, dtype=np.float32)
+        positions = np.asarray(positions, dtype=np.float32)
+        relative_global_pos = positions - ego_pos
+
+        cos_yaw = np.cos(-ego_yaw)
+        sin_yaw = np.sin(-ego_yaw)
+        rotation_matrix = np.array([
+            [sin_yaw, cos_yaw],
+            [-cos_yaw, sin_yaw],
+        ])
+        return relative_global_pos @ rotation_matrix.T
+
     def _resolve_prompt(self, prompt_template: Dict, prompt_usage: Dict,
                         candidates: List[str], usage_candidates: List[str],
                         fallback: str) -> str:
@@ -415,10 +524,11 @@ class VLMPlannerSpeedCurvature:
             f"longitudinal offset means front/back. The target is {lateral_phrase} and {longitudinal_phrase}."
         )
     
-    def _predict_speed_curvature(self, image: np.ndarray, scene_desc: str,
+    def _predict_speed_curvature(self, image, scene_desc: str,
                                  object_desc: str, intent_desc: str,
                                  ego_history: str, target_desc: str,
-                                 prompt_template: Dict, prompt_usage: Dict) -> Dict:
+                                 prompt_template: Dict, prompt_usage: Dict,
+                                 collab_agent_description: str = "") -> Dict:
         """
         Final prediction step: combine all context to predict speed and curvature.
         
@@ -426,7 +536,12 @@ class VLMPlannerSpeedCurvature:
             Dict with 'target_speed' and 'curvature' arrays
         """
         try:
-            img_base64 = self._encode_image(image)
+            if isinstance(image, list):
+                images = image
+            else:
+                images = [image]
+
+            encoded_images = [self._encode_image(img) for img in images]
 
             # Combined prompt - use ORIGINAL placeholder names
             comb_prompt = self._resolve_prompt(
@@ -495,27 +610,29 @@ class VLMPlannerSpeedCurvature:
             comb_prompt = comb_prompt.replace("{ego_history_prompt}", ego_history)    # WITH _prompt
             comb_prompt = comb_prompt.replace("{intent_description}", intent_desc)
             comb_prompt = comb_prompt.replace("{target_description}", target_desc)
-            comb_prompt = comb_prompt.replace("{collab_agent_description}", "")  # Single agent
+            comb_prompt = comb_prompt.replace("{collab_agent_description}", collab_agent_description)
             
             # Log the prepared prompt for debugging
             logger.debug(f"[PROMPT PREPARED]\n{comb_prompt}\n[END PROMPT]")
             
+            content = []
+            for img_base64 in encoded_images:
+                content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/png;base64,{img_base64}"
+                    }
+                })
+            content.append({
+                "type": "text",
+                "text": comb_prompt
+            })
+
             response = self.client.chat.completions.create(
                 model=self.api_model_name,
                 messages=[{
                     "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{img_base64}"
-                            }
-                        },
-                        {
-                            "type": "text",
-                            "text": comb_prompt
-                        }
-                    ]
+                    "content": content
                 }],
                 max_tokens=512,
                 temperature=0.3
@@ -586,6 +703,11 @@ class VLMPlannerSpeedCurvature:
                 'scene_description': scene_desc,
                 'object_description': object_desc,
                 'intent_description': intent_desc,
+                'target_description': target_desc,
+                'scene_description_length': len(scene_desc or ""),
+                'object_description_length': len(object_desc or ""),
+                'intent_description_length': len(intent_desc or ""),
+                'collab_agent_description': collab_agent_description,
                 'zero_deadlock_streak': int(self._zero_deadlock_streak),
                 'zero_override_candidate': bool(should_override),
                 'static_guard_applied': bool(guard_applied),
@@ -846,13 +968,13 @@ class VLMPlannerSpeedCurvature:
 
         signals['hazard_streak'] = int(self._static_hazard_streak)
 
-        if self._static_hazard_streak < 2:
+        if self._static_hazard_streak < 1:
             return prediction, False, "awaiting_temporal_confirmation", signals
 
         current_speed = float(speeds[0])
         current_curv = float(curvatures[0])
         mostly_straight = abs(current_curv) < 1.5
-        too_fast_for_hazard = current_speed > 8.0
+        too_fast_for_hazard = current_speed > 5.0 or float(speeds[0]) > 6.0
 
         if not (mostly_straight and too_fast_for_hazard):
             return prediction, False, "control_already_cautious", signals

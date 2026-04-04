@@ -120,6 +120,10 @@ class LangCoopAgent:
             max_throttle=control_config.get('max_throttle', 0.75),
             max_brake=control_config.get('max_brake', 1.0),
             max_steer=control_config.get('max_steer', 1.0),
+            max_target_speed=control_config.get(
+                'max_target_speed',
+                control_config.get('target_speed', 12.0),
+            ),
             curvature_scale=control_config.get('curvature_scale', 3.0)
         )
         logger.info("LangCoop Controller initialized")
@@ -197,29 +201,35 @@ class LangCoopAgent:
     
     def _update_perception_memory_bank(self):
         """Update perception memory bank with current frame (LangCoop architecture)."""
-        if 'camera' not in self.sensor_data:
+        frame_data = self.build_frame_data()
+        if frame_data is None:
             return
-        
-        transform = self.vehicle.get_transform()
-        location = transform.location
-        
-        # Build frame data
-        frame_data = {
-            'timestamp': self.sensor_data.get('camera_timestamp', self.frame_count * 0.5),
-            'detmap_pose': [torch.tensor([location.x, location.y, self.current_yaw], device=self.device)],
-            'ego_yaw': [self.current_yaw],
-            'front_image': self.sensor_data['camera'],
-            'target': [self._get_target_waypoint()],
-            'ego_speed': [self.current_speed]
-        }
-        
+
         self.perception_memory_bank.append(frame_data)
-        
+
         # Keep only recent history
         if len(self.perception_memory_bank) > self.max_history_frames:
             self.perception_memory_bank.pop(0)
-        
+
         self.frame_count += 1
+
+    def build_frame_data(self) -> Optional[Dict]:
+        """Build one perception frame for this agent."""
+        front_image = self.sensor_data.get('front_camera', self.sensor_data.get('camera'))
+        if front_image is None or self.vehicle is None:
+            return None
+
+        transform = self.vehicle.get_transform()
+        location = transform.location
+
+        return {
+            'timestamp': self.sensor_data.get('camera_timestamp', self.frame_count * 0.5),
+            'detmap_pose': [torch.tensor([location.x, location.y, self.current_yaw], device=self.device)],
+            'ego_yaw': [self.current_yaw],
+            'front_image': front_image,
+            'target': [self._get_target_waypoint()],
+            'ego_speed': [self.current_speed]
+        }
     
     def _get_target_waypoint(self) -> List[float]:
         """Get target waypoint relative to current position."""
@@ -298,8 +308,10 @@ class LangCoopAgent:
             # Prepare model config with prompts
             model_config = {
                 'planning': {
-                    'prompt_template': self.config.get('planning', {}).get('prompt_template', {})
-                }
+                    'prompt_template': self.config.get('planning', {}).get('prompt_template', {}),
+                    'prompt_usage': self.config.get('planning', {}).get('prompt_usage', {}),
+                },
+                'collab': self.config.get('collab', {'sharing_modalities': []}),
             }
             
             # Call VLM planner
@@ -327,6 +339,11 @@ class LangCoopAgent:
                 'curvature': [0.0],
                 'dt': 0.5
             }
+
+    def compute_control_from_plan(self, planned_route: Dict) -> carla.VehicleControl:
+        """Public helper to compute control from a precomputed plan."""
+        self.last_planned_route = planned_route
+        return self._compute_control(planned_route)
     
     def _compute_control(self, planned_route: Dict) -> carla.VehicleControl:
         """Compute vehicle control from planned route."""

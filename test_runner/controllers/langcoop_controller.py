@@ -65,6 +65,7 @@ class LangCoopController:
         self.max_throttle = float(kwargs.get('max_throttle', 0.75))
         self.max_brake = float(kwargs.get('max_brake', 1.0))
         self.max_steer = float(kwargs.get('max_steer', 1.0))
+        self.max_target_speed = float(kwargs.get('max_target_speed', 20.0))
         
     def run_step(self, route_info: Dict, curr_speed: float, buffer_idx: int = 0) -> Dict:
         """
@@ -86,6 +87,7 @@ class LangCoopController:
             target_speed = target_speeds[min(buffer_idx, len(target_speeds)-1)]
         else:
             target_speed = float(target_speeds)
+        target_speed = float(np.clip(target_speed, 0.0, self.max_target_speed))
         
         if isinstance(curvatures, list):
             curvature = curvatures[min(buffer_idx, len(curvatures)-1)]
