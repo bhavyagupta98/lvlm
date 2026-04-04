@@ -1,0 +1,147 @@
+{
+  "routes": [
+    {
+      "route_id": "town05_short_01",
+      "map_name": "Town05",
+      "waypoints": [
+        {
+          "location": {"x": -152.0, "y": 134.0, "z": 0.1},
+          "rotation": {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
+        },
+        {
+          "location": {"x": -100.0, "y": 134.0, "z": 0.1},
+          "rotation": {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
+        },
+        {
+          "location": {"x": -50.0, "y": 134.0, "z": 0.1},
+          "rotation": {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
+        },
+        {
+          "location": {"x": 0.0, "y": 134.0, "z": 0.1},
+          "rotation": {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
+        },
+        {
+          "location": {"x": 50.0, "y": 134.0, "z": 0.1},
+          "rotation": {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
+        }
+      ],
+      "total_distance": 200.0
+    },
+    {
+      "route_id": "town05_medium_01",
+      "map_name": "Town05",
+      "waypoints": [
+        {
+          "location": {"x": -152.0, "y": 134.0, "z": 0.1},
+          "rotation": {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
+        },
+        {
+          "location": {"x": -100.0, "y": 134.0, "z": 0.1},
+          "rotation": {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
+        },
+        {
+          "location": {"x": -50.0, "y": 100.0, "z": 0.1},
+          "rotation": {"pitch": 0.0, "yaw": -45.0, "roll": 0.0}
+        },
+        {
+          "location": {"x": 0.0, "y": 50.0, "z": 0.1},
+          "rotation": {"pitch": 0.0, "yaw": -90.0, "roll": 0.0}
+        },
+        {
+          "location": {"x": 50.0, "y": 50.0, "z": 0.1},
+          "rotation": {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
+        },
+        {
+          "location": {"x": 100.0, "y": 50.0, "z": 0.1},
+          "rotation": {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
+        }
+      ],
+      "total_distance": 350.0
+    },
+    {
+      "route_id": "town10_short_01",
+      "map_name": "Town10",
+      "waypoints": [
+        {
+          "location": {"x": 0.0, "y": 0.0, "z": 0.1},
+          "rotation": {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
+        },
+        {
+          "location": {"x": 50.0, "y": 0.0, "z": 0.1},
+          "rotation": {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
+        },
+        {
+          "location": {"x": 100.0, "y": 0.0, "z": 0.1},
+          "rotation": {"pitch": 0.0, "yaw": 0.0, "roll": 0.0}
+        }
+      ],
+      "total_distance": 100.0
+    }
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "town05_clear_easy",
+      "route_id": "town05_short_01",
+      "weather": {
+        "cloudiness": 0.0,
+        "precipitation": 0.0,
+        "wind_intensity": 0.0,
+        "sun_altitude_angle": 45.0,
+        "fog_distance": 1000.0,
+        "wetness": 0.0
+      },
+      "traffic_density": 0.1,
+      "pedestrian_density": 0.05,
+      "difficulty": "easy",
+      "description": "Clear weather, light traffic, short route"
+    },
+    {
+      "scenario_id": "town05_cloudy_medium",
+      "route_id": "town05_medium_01",
+      "weather": {
+        "cloudiness": 0.5,
+        "precipitation": 0.15,
+        "wind_intensity": 0.35,
+        "sun_altitude_angle": 30.0,
+        "fog_distance": 500.0,
+        "wetness": 0.1
+      },
+      "traffic_density": 0.4,
+      "pedestrian_density": 0.2,
+      "difficulty": "moderate",
+      "description": "Cloudy weather, medium traffic, longer route with turns"
+    },
+    {
+      "scenario_id": "town05_rainy_hard",
+      "route_id": "town05_medium_01",
+      "weather": {
+        "cloudiness": 1.0,
+        "precipitation": 0.8,
+        "wind_intensity": 0.7,
+        "sun_altitude_angle": 15.0,
+        "fog_distance": 200.0,
+        "wetness": 0.9
+      },
+      "traffic_density": 0.7,
+      "pedestrian_density": 0.4,
+      "difficulty": "hard",
+      "description": "Heavy rain, dense traffic, low visibility"
+    },
+    {
+      "scenario_id": "town10_clear_easy",
+      "route_id": "town10_short_01",
+      "weather": {
+        "cloudiness": 0.0,
+        "precipitation": 0.0,
+        "wind_intensity": 0.0,
+        "sun_altitude_angle": 45.0,
+        "fog_distance": 1000.0,
+        "wetness": 0.0
+      },
+      "traffic_density": 0.1,
+      "pedestrian_density": 0.05,
+      "difficulty": "easy",
+      "description": "Clear weather on Town10"
+    }
+  ]
+}

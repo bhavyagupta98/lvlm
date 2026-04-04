@@ -1,0 +1,60 @@
+# Default agent configuration for test runner
+# Python 3.12 + CARLA 0.9.16
+
+agent:
+  name: "simple_autonomous_agent"
+  version: "0.2.0"
+
+camera:
+  width: 800
+  height: 600
+  fov: 100.0
+
+control:
+  max_speed: 20.0  # m/s
+  target_speed: 5.0  # m/s (initial)
+  
+  # PID controller gains
+  pid:
+    throttle:
+      kp: 0.5
+      ki: 0.1
+      kd: 0.1
+    steering:
+      kp: 0.8
+      ki: 0.05
+      kd: 0.05
+
+planning:
+  # Can extend with VLM inference
+  method: "waypoint_following"
+  update_frequency: 10  # Hz
+
+perception:
+  sensors:
+    - camera
+    - imu
+
+# VLM Configuration (optional)
+vlm:
+  enabled: false                           # Set to true to enable VLM
+  type: "openai"                           # Options: openai, openrouter, anthropic
+  api_key: ""                              # Your API key (or set via env var)
+  api_base_url: "https://api.openai.com/v1"  # For OpenAI-compatible endpoints
+  model: "gpt-4-vision"                    # VLM model name
+  
+  # Alternative configurations:
+  # 
+  # For OpenRouter (supports multiple models):
+  # type: openrouter
+  # api_base_url: https://openrouter.ai/api/v1
+  # model: openai/gpt-4-vision
+  # 
+  # For Anthropic Claude:
+  # type: anthropic
+  # model: claude-3-5-sonnet-20241022
+  # 
+  # For vLLM (local deployment):
+  # type: openai
+  # api_base_url: http://localhost:8000/v1
+  # model: qwen2-vl-7b

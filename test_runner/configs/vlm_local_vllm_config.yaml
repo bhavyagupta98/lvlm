@@ -1,0 +1,42 @@
+# Example configuration with vLLM (local deployment)
+# Run locally with: vllm serve qwen2-vl-7b --host 0.0.0.0 --port 8000
+# Then set api_base_url to your vLLM server
+
+agent:
+  name: "vlm_agent_local"
+
+camera:
+  width: 800
+  height: 600
+  fov: 100.0
+
+control:
+  max_speed: 25.0
+  target_speed: 8.0
+  pid:
+    throttle:
+      kp: 0.6
+      ki: 0.15
+      kd: 0.1
+    steering:
+      kp: 0.9
+      ki: 0.08
+      kd: 0.08
+
+planning:
+  method: "vlm_speed_planning"
+  update_frequency: 5
+
+perception:
+  sensors:
+    - camera
+    - imu
+
+# Enable VLM with vLLM (local deployment)
+vlm:
+  enabled: true
+  type: "openai"  # vLLM uses OpenAI-compatible API
+  api_base_url: "http://localhost:8000/v1"  # Change to your vLLM server
+  model: "qwen2-vl-7b"  # Model name from your vLLM deployment
+  max_tokens: 10
+  temperature: 0.3

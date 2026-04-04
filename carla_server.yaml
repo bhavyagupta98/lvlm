@@ -1,0 +1,48 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: carla-gpu-job
+  namespace: seelab
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: carla-server
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: carla
+        image: carlasim/carla:0.9.16
+        command: ["/bin/bash", "-lc"]
+        args:
+          - |
+            set -e
+            echo "Starting CARLA..."
+            exec ./CarlaUE4.sh -RenderOffScreen -vulkan -nosound -carla-rpc-port=2000
+        ports:
+        - containerPort: 2000
+          name: rpc
+        - containerPort: 2001
+          name: streaming
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+            cpu: "8"
+            memory: "32Gi"
+          requests:
+            cpu: "8"
+            memory: "32Gi"
+        volumeMounts:
+        # - name: storage
+        #   mountPath: /workspace
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      # - name: storage
+      #   persistentVolumeClaim:
+      #     claimName: bgupta-pvc
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "8Gi"

@@ -1,0 +1,130 @@
+# LangCoop Agent Configuration with Local vLLM
+# Full integration with VLMPlannerSpeedCurvature
+
+agent:
+  name: "langcoop_vlm_agent"
+  version: "1.0.0"
+
+camera:
+  width: 800
+  height: 600
+  fov: 100.0
+
+control:
+  max_speed: 20.0  # m/s (speed limit from LangCoop)
+  target_speed: 8.0  # m/s (initial)
+  control_config: "vlmdrive/controller/hypes_yaml/speed_curvature.yaml"
+
+# Planning configuration following LangCoop architecture
+planning:
+  core_method: 'vlm_speed_curvature'
+  planner_config: "test_runner/configs/vlm_planner_local.yaml"
+  
+  # Prompt usage (CoT configuration)
+  prompt_usage:
+    scene_prompt_template: concise
+    object_prompt_template: concise
+    intention_prompt_template: concise
+    target_prompt_template: default
+    comb_prompt: default
+
+  # Prompt templates (Chain-of-Thought prompting)
+  prompt_template:
+    scene_prompt_template:
+      concise: |
+        You are an autonomous driving vehicle controller. 
+        You have access to a front-view camera image. <IMAGE_PLACEHOLDER>
+        Describe the driving scenario, including lane geometry, road direction, weather, traffic, and whether the drivable path continues straight or bends.
+        Explicitly describe lane boundaries and roadside structures (wall, barrier, curb, guardrail, fence), and whether any intrude into the drivable lane.
+        Explicitly classify road geometry as one of: straight, gentle-left, gentle-right, sharp-left, sharp-right.
+        State whether lane centerline trend suggests drift risk (left drift, right drift, none).
+        Please be very concise.
+    
+    object_prompt_template:
+      concise: |
+        You are an autonomous driving vehicle controller. 
+        You have access to a front-view camera image. <IMAGE_PLACEHOLDER>
+        Identify only traffic-relevant road users or obstacles that could affect the ego vehicle soon.
+        Include static hazards: wall, barrier, curb, guardrail, fence, parked vehicle, construction cones, debris, blocked lane edge.
+        Important: do not mark curb/guardrail/fence/wall as lane-blocking if they run parallel outside lane boundaries.
+        For each item, include side (left/right/center), distance (near/mid/far), and whether it blocks or intrudes into the ego lane/path.
+        List two or three highest-risk items.
+        Please be very concise.
+
+    intention_prompt_template:
+      concise: |
+        You are an autonomous driving vehicle controller. You must ensure that the vehicle follows traffic rules. 
+        - Speed limit: 20 m/s
+        - Goal: Reach the target location as quickly as possible while staying within the speed limit.
+        - Avoid collisions: If a car is ahead, slow down or change lanes.
+        You have access to a front-view camera image. <IMAGE_PLACEHOLDER>
+        {target_description}
+        The target is expressed in ego-relative coordinates: lateral offset means left or right, and longitudinal offset means front or back.
+        If the target is mostly ahead and the lateral offset is small, keep going straight with only slight steering corrections.
+        Prefer staying centered in the lane over aggressively cutting toward the waypoint.
+        If road geometry is straight, use near-zero curvature and actively correct lane drift:
+        - drifting right -> slight left correction
+        - drifting left -> slight right correction
+        Do not keep a persistent same-direction steering bias on straight roads.
+        Should you turn left, turn right, go straight, slightly adjust direction, accelerate, or decelerate?
+        Describe how you would navigate the vehicle to reach the target safely. 
+        Please be very concise.
+
+    target_prompt_template:
+      default: |
+        The target is {x_distance} meters to your {x_direction} and {y_distance} meters to your {y_direction}. 
+        The target is not an endpoint—continue moving forward after reaching it.
+
+    comb_prompt:
+      default: |
+        You are an autonomous driving vehicle controller. 
+        You have access to a front-view camera image. <IMAGE_PLACEHOLDER>
+        Here is the environment description and detected objects:
+        - Scene: {scene_description}
+        - Objects and intents: {object_description}
+        - Ego vehicle history: {ego_history_prompt}
+        - Intent of the ego vehicle: {intent_description}
+        {target_description}
+        
+        Based on this information, predict the vehicle's speed (m/s) and curvature (rad/m) for the next 5 timesteps (0.5s each).
+        Use smooth but decisive control.
+        First estimate road curvature from lane boundaries over the next 20-40 meters.
+        Map geometry to curvature magnitude:
+        - straight: near zero curvature
+        - gentle turn: small consistent curvature
+        - sharp turn/intersection: larger curvature
+        - On straight roads, or when the target is mostly ahead with only a small lateral offset, keep curvature close to 0.
+        - Only use large curvature for a clear bend, intersection turn, or obstacle avoidance.
+        - On straight roads, if ego drifts right, apply small negative curvature (left correction).
+        - On straight roads, if ego drifts left, apply small positive curvature (right correction).
+        - If uncertain, prefer curvature near zero rather than persistent one-sided steering.
+        - Stay centered in the drivable lane and do not steer toward the shoulder or sidewalk.
+        
+        Output format (JSON):
+        {
+          "predicted_speeds_curvatures": [
+            [speed1, curvature1],
+            [speed2, curvature2],
+            [speed3, curvature3],
+            [speed4, curvature4],
+            [speed5, curvature5]
+          ]
+        }
+        
+        Speed range: [0, 20] m/s
+        Curvature range: typical values are [-0.5, 0.5] rad/m (negative = left turn, positive = right turn)
+
+perception:
+  sensors:
+    - camera
+    - imu
+  detection_range: [36, 12, 12, 12]  # front rear left right
+
+# Collaboration settings (disabled for single-agent testing)
+collab:
+  sharing_modalities: []  # ['image', 'intent'] for multi-agent
+
+# Simulation settings
+simulation:
+  ego_num: 1
+  skip_frames: 4  # frame gap before new control signal

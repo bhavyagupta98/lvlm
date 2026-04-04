@@ -1,0 +1,90 @@
+# ==========================
+# Python
+# ==========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+venv/
+.env/
+.venv/
+env/
+
+# ==========================
+# Logs & Simulation Output
+# ==========================
+sim_output/
+*.jsonl
+*.log
+*.out
+*.err
+*.core
+core.*
+
+# Image outputs
+images/
+*.png
+*.jpg
+*.jpeg
+
+# ==========================
+# CARLA
+# ==========================
+# Unreal / CARLA temp files
+CarlaUE4/
+DerivedDataCache/
+Saved/
+Intermediate/
+
+# Recorder files
+*.rec
+
+# ==========================
+# Jupyter
+# ==========================
+.ipynb_checkpoints/
+
+# ==========================
+# Kubernetes
+# ==========================
+*.yaml.local
+*.kubeconfig
+
+# ==========================
+# OS
+# ==========================
+.DS_Store
+Thumbs.db
+
+# ==========================
+# IDE
+# ==========================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ==========================
+# Build / Dist
+# ==========================
+build/
+dist/
+*.egg-info/
+
+# ==========================
+# Model / ML Artifacts (optional)
+# ==========================
+checkpoints/
+runs/
+*.ckpt
+*.pt
+*.pth
+
+# ==========================
+# Large datasets
+# ==========================
+data/
+datasets/

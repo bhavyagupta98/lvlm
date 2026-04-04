@@ -1,0 +1,220 @@
+# LangCoop Agent Configuration - Qwen2.5-VL-72B-AWQ (CARLA 0.9.16 + Python 3.12)
+# Deploy with: carla_client_dev_4.yaml
+# 10x larger model with AWQ quantization = better reasoning
+
+# VLM Configuration (local vLLM with 72B AWQ quantized model)
+vlm:
+  enabled: true
+  api_model_name: "Qwen/Qwen2.5-VL-72B-Instruct-AWQ"
+  api_base_url: "http://localhost:8000/v1"
+  api_key: "EMPTY"
+
+# Camera Configuration
+camera:
+  width: 800
+  height: 600
+  fov: 100
+
+# Control Configuration
+control:
+  max_speed: 20.0  # m/s
+  target_speed: 12.0  # m/s baseline cruise speed
+  max_target_speed: 8.0  # m/s hard cap for calmer debugging runs
+  speed_kp: 8.0  # Increased from 5.0 for faster acceleration
+  speed_ki: 2.0  # Increased from 1.0 for stronger integral response
+  speed_kd: 0.1
+  speed_n: 5
+  steer_kp: 1.0
+  turn_kp: 1.0
+  turn_ki: 0.2
+  turn_kd: 0.1
+  turn_n: 30
+  clip_delta: 0.35
+  brake_ratio: 1.1
+  brake_speed: 0.1
+  max_throttle: 0.75
+  max_brake: 1.0
+  max_steer: 1.0
+  curvature_scale: 0.016667  # closer to upstream LangCoop lightweight controller (3 / 180)
+
+# Planning Configuration (Chain-of-Thought prompts - from original LangCoop)
+planning:
+  prompt_usage:
+    scene_prompt_template: concise
+    object_prompt_template: concise
+    intention_prompt_template: base_like
+    comb_prompt: base_like
+  prompt_template:
+    scene:
+      default: |
+        You are an autonomous driving vehicle controller. 
+        You have access to a front-view camera image. <IMAGE_PLACEHOLDER>
+        Describe the driving scenario, including lane geometry, road direction, weather, traffic, and whether the drivable path continues straight or bends.
+        Explicitly describe lane boundaries and roadside structures (wall, barrier, curb, guardrail, fence), and whether any intrude into the drivable lane.
+        Explicitly classify road geometry as one of: straight, gentle-left, gentle-right, sharp-left, sharp-right.
+        State whether lane centerline trend suggests drift risk (left drift, right drift, none).
+      concise: |
+        You are an autonomous driving vehicle controller. 
+        You have access to a front-view camera image. <IMAGE_PLACEHOLDER>
+        Describe the driving scenario, including lane geometry, road direction, weather, traffic, and whether the drivable path continues straight or bends.
+        Explicitly describe lane boundaries and roadside structures (wall, barrier, curb, guardrail, fence), and whether any intrude into the drivable lane.
+        Explicitly classify road geometry as one of: straight, gentle-left, gentle-right, sharp-left, sharp-right.
+        State whether lane centerline trend suggests drift risk (left drift, right drift, none).
+        Please be very concise.
+    
+    objects:
+      default: |
+        You are an autonomous driving vehicle controller. 
+        You have access to a front-view camera image. <IMAGE_PLACEHOLDER>
+        Identify only traffic-relevant road users or obstacles that could affect the ego vehicle soon.
+        Include static hazards: wall, barrier, curb, guardrail, fence, parked vehicle, construction cones, debris, blocked lane edge.
+        Important: do not treat painted road text/markings (e.g., "STOP" painted on asphalt) as a physical stop sign object.
+        Important: do not mark curb/guardrail/fence/wall as lane-blocking if they run parallel outside lane boundaries.
+        For each item, include side (left/right/center), distance (near/mid/far), and whether it blocks or intrudes into the ego lane/path.
+        List two or three highest-risk items.
+      concise: |
+        You are an autonomous driving vehicle controller. 
+        You have access to a front-view camera image. <IMAGE_PLACEHOLDER>
+        Identify only traffic-relevant road users or obstacles that could affect the ego vehicle soon.
+        Include static hazards: wall, barrier, curb, guardrail, fence, parked vehicle, construction cones, debris, blocked lane edge.
+        Important: do not treat painted road text/markings (e.g., "STOP" painted on asphalt) as a physical stop sign object.
+        Important: do not mark curb/guardrail/fence/wall as lane-blocking if they run parallel outside lane boundaries.
+        For each item, include side (left/right/center), distance (near/mid/far), and whether it blocks or intrudes into the ego lane/path.
+        List two or three highest-risk items.
+        Please be very concise.
+    
+    intent:
+      base_like: |
+        You are an autonomous driving vehicle controller. You must ensure that the vehicle follows traffic rules. 
+        - Speed limit: 20 m/s
+        - Goal: Reach the target location as quickly as possible while staying within the speed limit.
+        - Avoid collisions: If a car is ahead, slow down or change lanes.
+        - Road paint/text and lane markings are not physical obstacles.
+        You have access to a front-view camera image. <IMAGE_PLACEHOLDER>
+        {target_description}
+        Should you turn left, turn right, go straight, slightly adjust direction, accelerate, or decelerate?
+        Describe how you would navigate the vehicle to reach the target safely.
+      default: |
+        You are an autonomous driving vehicle controller. You must ensure that the vehicle follows traffic rules. 
+        - Speed limit: 20 m/s
+        - Goal: Reach the target location as quickly as possible while staying within the speed limit.
+        - Avoid collisions: If a car is ahead, slow down or change lanes.
+        - Road paint/text and lane markings are not physical obstacles.
+        You have access to a front-view camera image. <IMAGE_PLACEHOLDER>
+        {target_description}
+        The target is expressed in ego-relative coordinates: lateral offset means left or right, and longitudinal offset means front or back.
+        If the target is mostly ahead and the lateral offset is small, keep going straight with only slight steering corrections.
+        Prefer staying centered in the lane over aggressively cutting toward the waypoint.
+        If road geometry is straight, use near-zero curvature and actively correct lane drift:
+        - drifting right -> slight left correction
+        - drifting left -> slight right correction
+        Do not keep a persistent same-direction steering bias on straight roads.
+        Should you turn left, turn right, go straight, slightly adjust direction, accelerate, or decelerate?
+        Describe how you would navigate the vehicle to reach the target safely.
+      concise: |
+        You are an autonomous driving vehicle controller. You must ensure that the vehicle follows traffic rules. 
+        - Speed limit: 20 m/s
+        - Goal: Reach the target location as quickly as possible while staying within the speed limit.
+        - Avoid collisions: If a car is ahead, slow down or change lanes.
+        - Road paint/text and lane markings are not physical obstacles.
+        You have access to a front-view camera image. <IMAGE_PLACEHOLDER>
+        {target_description}
+        The target is expressed in ego-relative coordinates: lateral offset means left or right, and longitudinal offset means front or back.
+        If the target is mostly ahead and the lateral offset is small, keep going straight with only slight steering corrections.
+        Prefer staying centered in the lane over aggressively cutting toward the waypoint.
+        If road geometry is straight, use near-zero curvature and actively correct lane drift:
+        - drifting right -> slight left correction
+        - drifting left -> slight right correction
+        Do not keep a persistent same-direction steering bias on straight roads.
+        Should you turn left, turn right, go straight, slightly adjust direction, accelerate, or decelerate?
+        Describe how you would navigate the vehicle to reach the target safely. 
+        Please be very concise.
+    
+    target:
+      default: |
+        The target is {x_distance} meters to your {x_direction} and {y_distance} meters to your {y_direction}. 
+        The target is not an endpoint—continue moving forward after reaching it.
+    
+    prediction:
+      base_like: |
+        You are an autonomous driving vehicle controller. 
+        You have access to a front-view camera image. <IMAGE_PLACEHOLDER>
+        Here is the environment description and detected objects:
+        - Scene: {scene_description}
+        - Objects and intents: {object_description}
+        - Ego vehicle history: {ego_history_prompt}
+        - Intent of the ego vehicle: {intent_description}
+        - Collaborative agents' information are described as follows: {collab_agent_description}
+        {target_description}
+        Generate the vehicle's desired speed and curvature for the next 5 timestamps, ensuring safe and efficient movement towards the target.
+        - Speed (m/s): Range [0, 20]
+        - Curvature (degree/m): Range [-180, 180]
+        - Negative curvature = turning left
+        - Positive curvature = turning right
+        - Ensure traffic rule compliance
+        - Numerical values may be integers or decimals.
+        - Avoid collisions by slowing down or steering away from obstacles.
+        Output MUST be a valid JSON structure with the key "predicted_speeds_curvatures" containing a list of 5 [speed, curvature] pairs.
+        ```json
+        {{
+            "predicted_speeds_curvatures": [
+                [speed_1, curvature_1],
+                [speed_2, curvature_2],
+                [speed_3, curvature_3],
+                [speed_4, curvature_4],
+                [speed_5, curvature_5]
+            ]
+        }}
+        ```
+        No additional text outside of this JSON format.
+      default: |
+        You are an autonomous driving vehicle controller. 
+        You have access to a front-view camera image. <IMAGE_PLACEHOLDER>
+        Here is the environment description and detected objects:
+        - Scene: {scene_description}
+        - Objects and intents: {object_description}
+        - Ego vehicle history: {ego_history_prompt}
+        - Intent of the ego vehicle: {intent_description}
+        - Collaborative agents' information are described as follows: {collab_agent_description}
+        {target_description}
+        Generate the vehicle's desired speed and curvature for the next 5 timestamps, ensuring safe and efficient movement towards the target.
+        IMPORTANT SPEED GUIDANCE:
+        - On clear, straight roads with no obstacles: maintain 10-15 m/s (aggressive progress toward target).
+        - Only decelerate below 8 m/s if you detect a true hazard (car ahead, pedestrian, traffic light, accident).
+        - Road paint/markings and lane lines are NOT hazards—do not slow down for them.
+        - Prioritize reaching the target quickly; speed is essential for route completion.
+        STEERING GUIDANCE:
+        - First estimate road curvature from lane boundaries over the next 20-40 meters.
+        - Map geometry to curvature magnitude:
+          - straight: between -2 and +2 degree/m
+          - gentle turn: between 2 and 10 degree/m
+          - sharp turn/intersection turn: above 10 degree/m
+        - On straight roads, or when the target is mostly ahead with only a small lateral offset, keep curvature close to 0.
+        - Only use large curvature for a clear bend, intersection turn, or obstacle avoidance.
+        - Stay centered in the drivable lane and do not steer toward the shoulder or sidewalk.
+        - On straight roads, if ego drifts right, apply small negative curvature (left correction).
+        - On straight roads, if ego drifts left, apply small positive curvature (right correction).
+        - If visual evidence is uncertain or conflicting, prefer curvature near 0 (no steering bias).
+        GENERAL RULES:
+        - Speed (m/s): Range [0, 20], integer or decimal values. Default to 12 m/s unless hazard detected.
+        - Curvature (degree/m): Range [-180, 180], integer or decimal values.
+        - Negative curvature = turning left (counter-clockwise)
+        - Positive curvature = turning right (clockwise)
+        - Zero curvature = going straight ahead
+        - Ensure traffic rule compliance and avoid collisions
+        Output MUST be a valid JSON structure with the key "predicted_speeds_curvatures" containing a list of 5 [speed, curvature] pairs.
+        ```json
+        {{
+            "predicted_speeds_curvatures": [
+                [speed_1, curvature_1],
+                [speed_2, curvature_2],
+                [speed_3, curvature_3],
+                [speed_4, curvature_4],
+                [speed_5, curvature_5]
+            ]
+        }}
+        ```
+        No additional text outside of this JSON format.
+
+collab:
+  sharing_modalities: ["image", "intent"]

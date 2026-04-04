@@ -1,0 +1,25 @@
+# VLM Planner Configuration for Local vLLM Deployment
+# Uses VLMPlannerSpeedCurvature with local vLLM server
+
+model:
+  type: VLMPlannerSpeedCurvature
+  name: api  # Using API mode for vLLM
+  api_model_name: "qwen2-vl-7b"  # Change to your deployed model
+  api_base_url: "http://localhost:8000/v1"  # Local vLLM server
+  api_key: "EMPTY"  # vLLM doesn't require API key for local deployment
+
+# Model parameters
+parameters:
+  max_tokens: 512
+  temperature: 0.3
+  top_p: 0.9
+
+# History tracking
+history:
+  max_frames: 10
+  timestep: 0.5  # seconds between frames
+
+# Prediction horizon
+prediction:
+  num_waypoints: 5
+  time_horizon: 2.5  # seconds (5 * 0.5)

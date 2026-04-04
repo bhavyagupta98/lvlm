@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: carla-rpc
+  namespace: seelab
+spec:
+  selector:
+    app: carla-server
+  ports:
+  - name: rpc
+    port: 2000
+    targetPort: 2000
+  - name: stream
+    port: 2001
+    targetPort: 2001
+  type: ClusterIP

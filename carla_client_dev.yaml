@@ -1,0 +1,119 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: carla-client-dev
+  namespace: seelab
+  labels:
+    app: carla-client-dev
+spec:
+  restartPolicy: OnFailure
+
+  tolerations:
+    - key: "node.kubernetes.io/not-ready"
+      operator: "Exists"
+      effect: "NoExecute"
+      tolerationSeconds: 300
+    - key: "node.kubernetes.io/unreachable"
+      operator: "Exists"
+      effect: "NoExecute"
+      tolerationSeconds: 300
+    - key: "nvidia.com/gpu"
+      operator: "Exists"
+      effect: "PreferNoSchedule"
+    - key: "nautilus.io/issue"
+      operator: "Exists"
+      effect: "NoSchedule"
+    - key: "nautilus.io/testing"
+      operator: "Exists"
+      effect: "NoSchedule"
+
+  containers:
+  - name: client
+    image: vllm/vllm-openai:v0.4.1
+    command: ["/bin/bash", "-lc"]
+    args:
+      - |
+        set -e
+        trap 'echo "[ERROR] Script failed at line $LINENO"; exit 1' ERR
+
+        echo "[INFO] Installing utilities (with timeout)..."
+        timeout 300 apt-get update || { echo "[WARN] apt-get update failed, continuing..."; }
+        timeout 300 apt-get install -y \
+          vim procps htop curl wget iproute2 net-tools less tmux git \
+          && rm -rf /var/lib/apt/lists/* || echo "[WARN] Some packages failed to install"
+
+        export HF_HOME=/workspace/.cache/huggingface
+        export TRANSFORMERS_CACHE=/workspace/.cache/huggingface
+        export HF_HUB_DISABLE_TELEMETRY=1
+        mkdir -p /workspace/.cache/huggingface
+
+        echo "[INFO] GPU environment already initialized in base image"
+        
+        echo "[INFO] Installing vLLM 0.12.0 (supports Qwen2.5-VL-72B)..."
+        # Large wheels can take a long time to download/install on shared clusters.
+        timeout 3600 pip3 install --no-cache-dir vllm==0.12.0 || { echo "[ERROR] vLLM install failed"; exit 1; }
+
+        echo "[INFO] Installing CARLA client..."
+        timeout 900 pip3 install carla==0.9.16 || { echo "[ERROR] CARLA install failed"; exit 1; }
+
+        timeout 300 pip3 install torch-c-dlpack-ext || echo "[WARN] torch-c-dlpack-ext install failed"
+
+        echo "[INFO] Environment ready. Starting vLLM server with 72B-AWQ model..."
+        
+        export CUDA_VISIBLE_DEVICES=0
+        
+        vllm serve Qwen/Qwen2.5-VL-72B-Instruct-AWQ \
+          --host 0.0.0.0 \
+          --port 8000 \
+          --dtype float16 \
+          --gpu-memory-utilization 0.80 \
+          --max-model-len 4096 \
+          --max-num-seqs 1 \
+          --trust-remote-code
+
+    ports:
+      - containerPort: 8000
+        name: http
+
+    resources:
+      limits:
+        nvidia.com/a100: "1"
+        memory: "32Gi"
+        cpu: "8"
+      requests:
+        nvidia.com/a100: "1"
+        memory: "32Gi"
+        cpu: "8"
+
+    livenessProbe:
+      httpGet:
+        path: /health
+        port: 8000
+      initialDelaySeconds: 600
+      periodSeconds: 30
+      timeoutSeconds: 30
+      failureThreshold: 5
+
+    startupProbe:
+      httpGet:
+        path: /health
+        port: 8000
+      initialDelaySeconds: 120
+      periodSeconds: 10
+      timeoutSeconds: 30
+      failureThreshold: 360
+
+    volumeMounts:
+    - name: storage
+      mountPath: /workspace
+    - name: dshm
+      mountPath: /dev/shm
+
+  volumes:
+  - name: storage
+    persistentVolumeClaim:
+      claimName: bgupta-pvc
+  - name: dshm
+    emptyDir:
+      medium: Memory
+      sizeLimit: "8Gi"

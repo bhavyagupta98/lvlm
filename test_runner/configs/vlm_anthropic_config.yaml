@@ -1,0 +1,45 @@
+# VLM Configuration for Anthropic Claude
+# 
+# Supports:
+# - claude-3-5-sonnet-20241022 (fast, cost-effective)
+# - claude-3-opus-20250219 (most capable)
+# - claude-3-sonnet-20240229 (balanced)
+# - claude-3-haiku-20240307 (cheapest)
+#
+# Setup:
+# 1. Get API key from https://console.anthropic.com/
+# 2. Export: export ANTHROPIC_API_KEY="sk-ant-..."
+# 3. Install: pip install anthropic>=0.7.0
+# 4. Run: python test_runner_evaluation.py --config test_runner/configs/vlm_anthropic_config.yaml
+
+agent:
+  type: "simple_autonomous"
+  perception:
+    camera:
+      width: 800
+      height: 600
+      fov: 110
+    imu:
+      enabled: true
+  planning:
+    speed_range: [0, 25]
+    steering_range: [-1.0, 1.0]
+  control:
+    pid:
+      speed_kp: 0.8
+      speed_ki: 0.0
+      speed_kd: 0.2
+      steer_kp: 0.5
+      steer_ki: 0.0
+      steer_kd: 0.1
+
+# Vision Language Model Configuration
+vlm:
+  enabled: true
+  type: "anthropic"
+  api_key: "${ANTHROPIC_API_KEY}"
+  model: "claude-3-5-sonnet-20241022"  # Fast/cost-effective option
+  # model: "claude-3-opus-20250219"    # More capable (slower, more expensive)
+  # model: "claude-3-haiku-20240307"   # Cheapest option (faster)
+  max_tokens: 10
+  temperature: 0.3
